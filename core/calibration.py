@@ -1,0 +1,192 @@
+"""
+core/calibration.py — Self-calibration of forecast accuracy.
+Learns per-city sigma from resolved markets over time.
+
+v3.1 — Added:
+  - Calibration curve tracking (predicted p vs actual outcome)
+  - Brier score computation
+  - Per-bucket reliability analysis
+"""
+
+import json
+import math
+import logging
+from datetime import datetime, timezone
+from config.settings import CALIBRATION_FILE, DATA_DIR, CALIBRATION_MIN, SIGMA_F, SIGMA_C
+from config.locations import LOCATIONS
+
+logger = logging.getLogger("weatherbet.calibration")
+
+_cal: dict = {}
+
+# File to track predictions for calibration curve
+PREDICTIONS_FILE = DATA_DIR / "predictions_log.json"
+
+
+def load_cal() -> dict:
+    global _cal
+    if CALIBRATION_FILE.exists():
+        try:
+            _cal = json.loads(CALIBRATION_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            _cal = {}
+    else:
+        _cal = {}
+    return _cal
+
+
+def get_sigma(city_slug: str, source: str = "ecmwf") -> float:
+    """Get calibrated sigma for a city+source. Falls back to default."""
+    key = f"{city_slug}_{source}"
+    if key in _cal:
+        return _cal[key]["sigma"]
+    return SIGMA_F if LOCATIONS[city_slug]["unit"] == "F" else SIGMA_C
+
+
+def log_prediction(city: str, date: str, p: float, edge: float, price: float,
+                    source: str, sigma: float, confidence: float):
+    """Log a prediction for later calibration analysis."""
+    try:
+        if PREDICTIONS_FILE.exists():
+            preds = json.loads(PREDICTIONS_FILE.read_text(encoding="utf-8"))
+        else:
+            preds = []
+
+        preds.append({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "city": city,
+            "date": date,
+            "p": round(p, 4),
+            "edge": round(edge, 4),
+            "price": round(price, 4),
+            "source": source,
+            "sigma": round(sigma, 2),
+            "confidence": round(confidence, 2),
+            "outcome": None,  # filled when resolved
+        })
+
+        # Keep last 500 predictions
+        if len(preds) > 500:
+            preds = preds[-500:]
+
+        PREDICTIONS_FILE.write_text(json.dumps(preds, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("[CAL] Failed to log prediction: %s", e)
+
+
+def record_outcome(city: str, date: str, won: bool):
+    """Record the outcome of a resolved prediction."""
+    try:
+        if not PREDICTIONS_FILE.exists():
+            return
+        preds = json.loads(PREDICTIONS_FILE.read_text(encoding="utf-8"))
+        updated = False
+        for pred in reversed(preds):
+            if pred["city"] == city and pred["date"] == date and pred["outcome"] is None:
+                pred["outcome"] = 1 if won else 0
+                pred["resolved_at"] = datetime.now(timezone.utc).isoformat()
+                updated = True
+                break
+        if updated:
+            PREDICTIONS_FILE.write_text(json.dumps(preds, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("[CAL] Failed to record outcome: %s", e)
+
+
+def compute_calibration_report() -> dict:
+    """
+    Compute calibration metrics from logged predictions.
+    Returns: brier_score, accuracy, calibration_curve, total_predictions.
+    """
+    try:
+        if not PREDICTIONS_FILE.exists():
+            return {"total": 0}
+        preds = json.loads(PREDICTIONS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"total": 0}
+
+    resolved = [p for p in preds if p.get("outcome") is not None]
+    if not resolved:
+        return {"total": 0}
+
+    # Brier score: mean squared error of probability predictions
+    brier_sum = sum((p["p"] - p["outcome"]) ** 2 for p in resolved)
+    brier_score = brier_sum / len(resolved)
+
+    # Accuracy: did high-confidence predictions win?
+    correct = sum(1 for p in resolved if (p["p"] > 0.5) == (p["outcome"] == 1))
+    accuracy = correct / len(resolved) if resolved else 0
+
+    # Calibration curve: group predictions into bins
+    bins = {}
+    for p in resolved:
+        # Round p to nearest 0.1 for binning
+        bin_key = round(p["p"] * 10) / 10
+        if bin_key not in bins:
+            bins[bin_key] = {"predicted": [], "actual": []}
+        bins[bin_key]["predicted"].append(p["p"])
+        bins[bin_key]["actual"].append(p["outcome"])
+
+    curve = {}
+    for bin_key in sorted(bins):
+        predicted_avg = sum(bins[bin_key]["predicted"]) / len(bins[bin_key]["predicted"])
+        actual_avg = sum(bins[bin_key]["actual"]) / len(bins[bin_key]["actual"])
+        n = len(bins[bin_key]["predicted"])
+        curve[f"{bin_key:.1f}"] = {
+            "predicted_avg": round(predicted_avg, 3),
+            "actual_win_rate": round(actual_avg, 3),
+            "n": n,
+            "gap": round(abs(predicted_avg - actual_avg), 3),
+        }
+
+    return {
+        "total": len(resolved),
+        "brier_score": round(brier_score, 4),
+        "accuracy": round(accuracy, 3),
+        "calibration_curve": curve,
+    }
+
+
+def run_calibration(markets: list[dict]) -> dict:
+    """Recalculate sigma from resolved markets and persist."""
+    resolved = [
+        m for m in markets
+        if m.get("resolved") or (m.get("status") == "resolved" and m.get("actual_temp") is not None)
+    ]
+    cal = load_cal()
+    updated = []
+
+    for source in ["ecmwf", "hrrr", "metar"]:
+        for city in set(m["city"] for m in resolved):
+            group = [m for m in resolved if m["city"] == city]
+            errors = []
+            for m in group:
+                snap = next(
+                    (s for s in reversed(m.get("forecast_snapshots", []))
+                     if s.get("best_source") == source),
+                    None,
+                )
+                if snap and snap.get("best") is not None and m.get("actual_temp") is not None:
+                    errors.append(abs(snap["best"] - m["actual_temp"]))
+            if len(errors) < CALIBRATION_MIN:
+                continue
+            mae = sum(errors) / len(errors)
+            key = f"{city}_{source}"
+            old = cal.get(key, {}).get(
+                "sigma",
+                SIGMA_F if LOCATIONS.get(city, {}).get("unit") == "F" else SIGMA_C,
+            )
+            new = round(mae, 3)
+            cal[key] = {
+                "sigma": new,
+                "n": len(errors),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if abs(new - old) > 0.05:
+                city_name = LOCATIONS.get(city, {}).get("name", city)
+                updated.append(f"{city_name} {source}: {old:.2f}->{new:.2f}")
+
+    CALIBRATION_FILE.write_text(json.dumps(cal, indent=2), encoding="utf-8")
+    if updated:
+        logger.info("[CAL] %s", ", ".join(updated))
+    return cal
