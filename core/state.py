@@ -98,3 +98,42 @@ def new_market(city_slug: str, date_str: str, event: dict, hours: float) -> dict
         "all_outcomes":       [],
         "created_at":         datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ═══════════════════════════════════════════════════════════
+# CLEAR SIMULATION DATA
+# ═══════════════════════════════════════════════════════════
+
+def clear_simulation_data():
+    """Clear all simulation data: markets, state, and predictions log."""
+    try:
+        # Delete all market cache files
+        for f in MARKETS_DIR.glob("*.json"):
+            try:
+                f.unlink()
+                logger.info("[CLEAR] Deleted market file: %s", f.name)
+            except Exception as e:
+                logger.error("[CLEAR] Failed to delete %s: %s", f.name, e)
+        
+        # Reset state to initial values
+        initial_state = {
+            "balance":          BALANCE,
+            "starting_balance": BALANCE,
+            "total_trades":     0,
+            "wins":             0,
+            "losses":           0,
+            "peak_balance":     BALANCE,
+        }
+        save_state(initial_state)
+        logger.info("[CLEAR] State reset to initial values")
+        
+        # Clear predictions log
+        pred_log = STATE_FILE.parent / "predictions_log.json"
+        if pred_log.exists():
+            pred_log.write_text("[]", encoding="utf-8")
+            logger.info("[CLEAR] Predictions log cleared")
+        
+        return True, "✅ Simulation data cleared successfully"
+    except Exception as e:
+        logger.error("[CLEAR] Failed to clear simulation data: %s", e)
+        return False, f"❌ Error clearing data: {e}"

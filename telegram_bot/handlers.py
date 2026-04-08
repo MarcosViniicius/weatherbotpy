@@ -79,6 +79,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/simulate — Switch to simulation\n"
             "/production — Switch to production\n"
             "/confirm \\<code\\> — Confirm production\n"
+            "/clear — Clear simulation data \\(simulation only\\)\n"
             "/help — This message"
         )
         await _safe_reply(update, text)
@@ -470,4 +471,27 @@ async def cmd_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(message)
     except Exception as e:
         logger.error("[/confirm] %s", e)
+        await update.message.reply_text(f"Error: {e}")
+
+
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /clear — clear all simulation data (simulation mode only)."""
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+
+        mode = mode_manager.get_mode()
+        if mode != "simulation":
+            await update.message.reply_text("⚠️ *Unsafe in production mode\\!* Use /simulate first\\.", parse_mode="MarkdownV2")
+            return
+
+        from core.state import clear_simulation_data
+        success, message = clear_simulation_data()
+        if success:
+            await _safe_reply(update, message)
+        else:
+            await update.message.reply_text(message)
+
+    except Exception as e:
+        logger.error("[/clear] %s", e)
         await update.message.reply_text(f"Error: {e}")

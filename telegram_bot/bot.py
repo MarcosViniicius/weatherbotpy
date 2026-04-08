@@ -39,10 +39,11 @@ def build_application() -> Application | None:
     app.add_handler(CommandHandler("simulate",   handlers.cmd_simulate))
     app.add_handler(CommandHandler("production", handlers.cmd_production))
     app.add_handler(CommandHandler("confirm",    handlers.cmd_confirm))
+    app.add_handler(CommandHandler("clear",      handlers.cmd_clear))
     app.add_handler(CommandHandler("cancel",     handlers.cmd_cancel))
     app.add_handler(CommandHandler("cancelall",  handlers.cmd_cancelall))
     app.add_handler(CommandHandler("notifications", handlers.cmd_notifications))
     app.add_handler(CommandHandler("calibration", handlers.cmd_calibration))
 
-    logger.info("[BOT] Application built with %d handlers", 18)
+    logger.info("[BOT] Application built with %d handlers", 19)
     return app
