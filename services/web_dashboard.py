@@ -7,18 +7,56 @@ Runs alongside the Telegram bot in the same process.
 import json
 import asyncio
 import logging
+import base64
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from threading import Thread
 from datetime import datetime, timezone
 
 from config import settings
+import socket
 
 logger = logging.getLogger("weatherbet.dashboard")
 
 _server: HTTPServer | None = None
 _thread: Thread | None = None
-DASHBOARD_PORT = 8877
+DASHBOARD_PORT = int(getattr(settings, 'DASHBOARD_PORT', 8877))
+
+
+# ═══════════════════════════════════════════════════════════
+# AUTHENTICATION
+# ═══════════════════════════════════════════════════════════
+
+def _is_auth_enabled() -> bool:
+    """Check if authentication is enabled."""
+    auth_enabled = getattr(settings, 'DASHBOARD_AUTH_ENABLED', 'false').lower()
+    return auth_enabled in ('true', '1', 'yes', 'on')
+
+
+def _check_auth(auth_header: str | None) -> bool:
+    """
+    Verify Basic Auth credentials.
+    Returns True if valid or auth disabled, False if invalid.
+    """
+    if not _is_auth_enabled():
+        return True
+    
+    if not auth_header or not auth_header.startswith("Basic "):
+        return False
+    
+    try:
+        # Extract and decode credentials
+        encoded = auth_header[6:]  # Skip "Basic "
+        decoded = base64.b64decode(encoded).decode('utf-8')
+        username, password = decoded.split(':', 1)
+        
+        # Check against settings
+        expected_user = getattr(settings, 'DASHBOARD_USERNAME', 'admin')
+        expected_pass = getattr(settings, 'DASHBOARD_PASSWORD', 'changeme')
+        
+        return username == expected_user and password == expected_pass
+    except Exception:
+        return False
 
 
 def _build_api_data() -> dict:
@@ -150,10 +188,41 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(settings.PROJECT_ROOT), **kwargs)
 
+    def _send_auth_required(self):
+        """Send 401 Unauthorized response."""
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="WeatherBot Dashboard"')
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Authentication required")
+
     def do_GET(self):
+        # Login endpoint (no auth required)
+        if self.path.startswith("/api/login"):
+            try:
+                auth_header = self.headers.get("Authorization")
+                if not _check_auth(auth_header):
+                    return self._send_auth_required()
+                
+                # Return success
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ok"}).encode())
+            except Exception as e:
+                logger.error("[DASH] Login error: %s", e)
+                self.send_response(500)
+                self.end_headers()
+            return
+
         # API endpoint
         if self.path.startswith("/api/data"):
             try:
+                # Check authentication
+                auth_header = self.headers.get("Authorization")
+                if not _check_auth(auth_header):
+                    return self._send_auth_required()
+                
                 data = _build_api_data()
                 payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
                 self.send_response(200)
@@ -177,6 +246,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         # Dashboard page (root or /dashboard)
         if self.path in ("/", "/dashboard", "/dashboard.html"):
+            # Check authentication for dashboard page
+            auth_header = self.headers.get("Authorization")
+            if not _check_auth(auth_header):
+                return self._send_auth_required()
+            
             self.path = "/dashboard.html"
 
         # Serve static files normally
@@ -195,7 +269,15 @@ def start_dashboard(port: int = DASHBOARD_PORT):
         _server = HTTPServer(("0.0.0.0", port), DashboardHandler)
         _thread = Thread(target=_server.serve_forever, daemon=True)
         _thread.start()
-        logger.info("[DASH] Dashboard running at http://localhost:%d", port)
+        
+        # Determine public URL
+        public_url = getattr(settings, 'DASHBOARD_PUBLIC_URL', '').strip()
+        if public_url:
+            # User specified a public URL/IP for VPS access
+            logger.info("[DASH] Dashboard running at http://%s:%d (local: http://localhost:%d)", public_url, port, port)
+        else:
+            # Local only
+            logger.info("[DASH] Dashboard running at http://localhost:%d", port)
     except OSError as e:
         logger.warning("[DASH] Could not start dashboard: %s", e)
 

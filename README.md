@@ -61,41 +61,133 @@ Every Polymarket weather market resolves on a specific airport station. NYC reso
 
 ---
 
-## Installation
+## 🚀 Quick Start (Docker)
+
+**Fastest way to get running:**
+
+```bash
+# 1. Copy configuration
+cp .env.example .env
+
+# 2. Edit with your credentials
+nano .env
+# Fill in: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+
+# 3. Start bot
+docker-compose up -d
+
+# 4. Access dashboard
+open http://localhost:8877
+```
+
+→ **Full guide**: See [SETUP.md](SETUP.md)
+
+---
+
+## Installation (Local/Development)
+
 ```bash
 git clone https://github.com/alteregoeth-ai/weatherbot
 cd weatherbot
-pip install requests
+pip install -r requirements.txt
 ```
 
-Create `config.json` in the project folder:
-```json
-{
-  "balance": 10000.0,
-  "max_bet": 20.0,
-  "min_ev": 0.05,
-  "max_price": 0.45,
-  "min_volume": 2000,
-  "min_hours": 2.0,
-  "max_hours": 72.0,
-  "kelly_fraction": 0.25,
-  "max_slippage": 0.03,
-  "scan_interval": 3600,
-  "calibration_min": 30,
-  "vc_key": "YOUR_VISUAL_CROSSING_KEY"
-}
+Create `.env` file:
+```bash
+cp .env.example .env
+nano .env
 ```
 
-Get a free Visual Crossing API key at visualcrossing.com — used to fetch actual temperatures after market resolution.
+Fill in required variables:
+```env
+TELEGRAM_TOKEN=your-token-from-botfather
+TELEGRAM_CHAT_ID=your-chat-id-here
+BOT_MODE=simulation
+DASHBOARD_PORT=8877
+```
 
 ---
 
 ## Usage
+
+**With Docker (Recommended for production):**
 ```bash
-python weatherbet.py           # start the bot — scans every hour
-python weatherbet.py status    # balance and open positions
-python weatherbet.py report    # full breakdown of all resolved markets
+docker-compose up -d           # Start in background
+docker-compose logs -f         # View live logs
+docker-compose down            # Stop container
 ```
+
+**Locally (For testing):**
+```bash
+python main.py                 # Start bot
+# Dashboard: http://localhost:8877
+```
+
+---
+
+## Recent Improvements
+
+✅ **Real Edge Tracking** — Measures actual edge after spread + slippage costs
+✅ **Single-Instance Protection** — Prevents duplicate bot instances
+✅ **HTTP Basic Authentication** — Secure dashboard access
+✅ **Remote Dashboard Access** — Access from VPS via DASHBOARD_PUBLIC_URL
+✅ **Multi-Stage Docker Build** — Minimal ~192MB image (vs 900MB+)
+✅ **Resilience** — Increased API timeouts for international connections
+✅ **Clean Simulation Mode** — `/clear` command for testing
+
+---
+
+## 📊 Dashboard Features
+
+- **Real-time metrics**: Balance, P&L, total trades
+- **Trade history**: All executed trades with timestamps
+- **Open positions**: Current bets and their status
+- **Calibration stats**: Model accuracy by location
+- **Edge tracking**: Theoretical vs actual edge comparison
+- **Authentication**: Optional HTTP Basic Auth with localStorage persistence
+
+---
+
+## 📚 Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [SETUP.md](SETUP.md) | Quick start guide |
+| [DEPLOY_AND_OPS.md](DEPLOY_AND_OPS.md) | Complete deployment & operations |
+| [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | Docker commands cheatsheet |
+| [DOCKER_GUIDE.md](DOCKER_GUIDE.md) | Detailed Docker guide |
+| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Debugging & fixing issues |
+| [.env.example](.env.example) | Configuration template |
+
+---
+
+## Pre-Deployment Checklist
+
+Run this before first deployment:
+```bash
+chmod +x check-deployment.sh
+./check-deployment.sh
+```
+
+---
+
+## Deploy to VPS
+
+Automated setup script:
+```bash
+chmod +x deploy-vps.sh
+scp deploy-vps.sh root@YOUR_VPS_IP:/tmp/
+ssh root@YOUR_VPS_IP
+sudo bash /tmp/deploy-vps.sh
+```
+
+Then deploy your code and run Docker:
+```bash
+cd /opt/weatherbot
+docker-compose up -d
+```
+
+→ **Full guide**: See [DEPLOY_AND_OPS.md](DEPLOY_AND_OPS.md)
 
 ---
 

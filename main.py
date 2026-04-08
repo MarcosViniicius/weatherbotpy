@@ -9,6 +9,7 @@ import sys
 import asyncio
 import logging
 import os
+import tempfile
 from pathlib import Path
 
 # Ensure project root is on sys.path
@@ -35,28 +36,42 @@ logger = logging.getLogger("weatherbet")
 # ── Single Instance Lock ──────────────────────────────────
 def _check_single_instance():
     """Ensure only one bot instance is running. Remove stale lockfile on restart."""
-    lock_file = Path("/tmp/weatherbot.lock")
+    lock_dir = Path(tempfile.gettempdir())
+    lock_file = lock_dir / "weatherbot.lock"
     
     if lock_file.exists():
         try:
             pid = int(lock_file.read_text().strip())
-            # Check if process still exists
-            if os.path.exists(f"/proc/{pid}"):
-                logger.error(
-                    "[LOCK] Another bot instance is already running (PID %d). "
-                    "Run: pkill -f 'python main.py'", pid
-                )
-                sys.exit(1)
-            else:
+            
+            # Check if process still exists (cross-platform)
+            try:
+                # Try to check if process exists
+                if sys.platform == "linux" or sys.platform == "darwin":
+                    # Linux/macOS: check /proc
+                    if os.path.exists(f"/proc/{pid}"):
+                        logger.error(
+                            "[LOCK] Another bot instance is already running (PID %d). "
+                            "Run: pkill -f 'python main.py'", pid
+                        )
+                        sys.exit(1)
+                    else:
+                        raise ProcessLookupError()
+                else:
+                    # Windows: can't easily check, so just remove old lock
+                    raise ProcessLookupError()
+            except (ProcessLookupError, FileNotFoundError):
                 # Stale lock file — remove it
                 lock_file.unlink()
                 logger.info("[LOCK] Removed stale lock file (process %d not found)", pid)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[LOCK] Could not check existing lock: %s", e)
     
     # Create new lock file
-    lock_file.write_text(str(os.getpid()))
-    logger.info("[LOCK] Instance lock acquired (PID %d)", os.getpid())
+    try:
+        lock_file.write_text(str(os.getpid()))
+        logger.info("[LOCK] Instance lock acquired (PID %d) at %s", os.getpid(), lock_file)
+    except Exception as e:
+        logger.warning("[LOCK] Could not acquire lock: %s (continuing anyway)", e)
 
 
 def _print_banner():
@@ -64,6 +79,13 @@ def _print_banner():
     mode_label = "🔴 PRODUCTION" if mode == "production" else "🟡 SIMULATION"
     telegram_ok = "✅" if settings.TELEGRAM_TOKEN and not settings.TELEGRAM_TOKEN.startswith("your-") else "❌"
     clob_ok = "✅" if settings.POLYMARKET_PRIVATE_KEY and not settings.POLYMARKET_PRIVATE_KEY.startswith("your-") else "❌"
+    
+    # Determine dashboard URL
+    public_url = getattr(settings, 'DASHBOARD_PUBLIC_URL', '').strip()
+    if public_url:
+        dashboard_line = f"║  Dashboard: http://{public_url}:{DASHBOARD_PORT:<26}║"
+    else:
+        dashboard_line = f"║  Dashboard: http://localhost:{DASHBOARD_PORT:<24}║"
 
     print(f"""
 ╔══════════════════════════════════════════════╗
@@ -77,7 +99,7 @@ def _print_banner():
 ║  Telegram:  {telegram_ok:<33}║
 ║  CLOB:      {clob_ok:<33}║
 ║  Data:      {str(settings.DATA_DIR):<33}║
-║  Dashboard: http://localhost:{DASHBOARD_PORT:<22}║
+{dashboard_line}
 ╚══════════════════════════════════════════════╝
 """)
 
@@ -112,12 +134,14 @@ async def _post_shutdown(app):
     stop_dashboard()
     
     # Clean up lock file
-    lock_file = Path("/tmp/weatherbot.lock")
+    lock_dir = Path(tempfile.gettempdir())
+    lock_file = lock_dir / "weatherbot.lock"
     if lock_file.exists():
         try:
             lock_file.unlink()
-        except Exception:
-            pass
+            logger.info("[LOCK] Lock file removed")
+        except Exception as e:
+            logger.warning("[LOCK] Could not remove lock file: %s", e)
     
     logger.info("[BOT] Scheduler stopped")
 

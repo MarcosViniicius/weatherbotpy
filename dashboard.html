@@ -89,6 +89,8 @@ body::after{content:'';position:fixed;inset:0;background-image:linear-gradient(r
 .mode-badge{font-size:9px;padding:2px 8px;border-radius:2px;letter-spacing:1px;}
 .mode-badge.sim{background:rgba(255,204,0,.06);color:var(--yellow);border:1px solid rgba(255,204,0,.2);}
 .mode-badge.prod{background:rgba(255,34,68,.06);color:var(--red);border:1px solid rgba(255,34,68,.2);}
+.logout-btn{background:rgba(255,34,68,.1);border:1px solid rgba(255,34,68,.3);color:var(--red);padding:4px 10px;border-radius:2px;font-size:9px;cursor:pointer;font-family:var(--mono);letter-spacing:1px;transition:all .2s;display:none;}
+.logout-btn:hover{background:rgba(255,34,68,.25);box-shadow:0 0 8px rgba(255,34,68,.4);}
 </style>
 </head>
 <body>
@@ -100,6 +102,7 @@ body::after{content:'';position:fixed;inset:0;background-image:linear-gradient(r
     <div class="brand-sub">Polymarket · ECMWF + HRRR + METAR · Kelly Criterion · EV Analysis</div>
   </div>
   <div class="header-right">
+    <button class="logout-btn" id="logoutBtn" onclick="handleLogout()">LOGOUT</button>
     <div class="live-pill"><div class="dot gray" id="status-dot"></div><span id="status-text">CONNECTING...</span></div>
     <div class="ts" id="ts">—</div>
   </div>
@@ -161,6 +164,174 @@ body::after{content:'';position:fixed;inset:0;background-image:linear-gradient(r
 </div>
 
 <script>
+// ═════════════════════════════════════════════════════════════
+// AUTHENTICATION
+// ═════════════════════════════════════════════════════════════
+
+let authToken = null;  // base64(username:password)
+let authRequired = false;
+
+// Load stored credentials on page load
+function loadStoredAuth() {
+  authToken = localStorage.getItem('weatherbot_auth');
+  if (authToken) {
+    console.log('[AUTH] Found stored credentials, attempting automatic login...');
+  }
+}
+
+function getAuthHeaders() {
+  if (!authToken) return {};
+  return {'Authorization': 'Basic ' + authToken};
+}
+
+async function checkAuthRequired() {
+  try {
+    const resp = await fetch('/api/data', {
+      headers: getAuthHeaders()
+    });
+    
+    if (resp.status === 401) {
+      authRequired = true;
+      showLoginScreen();
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error('[AUTH] Error checking auth:', e);
+    return false;
+  }
+}
+
+function showLoginScreen() {
+  const html = `
+    <div style="position: fixed; inset: 0; background: #000; display: flex; align-items: center; justify-content: center; z-index: 10000;">
+      <div style="background: #020c02; border: 1px solid #0a2a0a; border-radius: 4px; padding: 32px; width: 90%; max-width: 320px; box-shadow: 0 0 20px rgba(0,255,65,.2);">
+        <div style="font-family: 'Orbitron', sans-serif; font-size: 20px; color: #00ff41; margin-bottom: 24px; letter-spacing: 2px; text-align: center; text-shadow: 0 0 10px rgba(0,255,65,.3);">LOGIN</div>
+        
+        <form id="loginForm" onsubmit="handleLogin(event)" style="display: flex; flex-direction: column; gap: 12px;">
+          <input 
+            type="text" 
+            id="loginUsername" 
+            placeholder="Username" 
+            style="background: #000; border: 1px solid #0a2a0a; color: #88ff88; padding: 10px; font-family: 'Share Tech Mono', monospace; border-radius: 2px; font-size: 12px;"
+            autocomplete="off"
+            required
+          />
+          <input 
+            type="password" 
+            id="loginPassword" 
+            placeholder="Password" 
+            style="background: #000; border: 1px solid #0a2a0a; color: #88ff88; padding: 10px; font-family: 'Share Tech Mono', monospace; border-radius: 2px; font-size: 12px;"
+            autocomplete="off"
+            required
+          />
+          <label style="display: flex; align-items: center; gap: 8px; color: #88ff88; font-size: 11px; cursor: pointer;">
+            <input type="checkbox" id="rememberMe" style="cursor: pointer;" checked />
+            Remember for 30 days
+          </label>
+          <button 
+            type="submit" 
+            style="background: #00ff41; color: #000; border: none; padding: 10px; font-weight: 600; cursor: pointer; border-radius: 2px; font-family: 'Share Tech Mono', monospace; text-transform: uppercase; letter-spacing: 1px; margin-top: 12px; transition: all .2s;"
+            onmouseover="this.style.boxShadow='0 0 12px rgba(0,255,65,.6)'"
+            onmouseout="this.style.boxShadow='none'"
+          >Login</button>
+        </form>
+        
+        <div id="loginError" style="color: #ff2244; font-size: 9px; margin-top: 12px; text-align: center; display: none;"></div>
+      </div>
+    </div>
+  `;
+  
+  const wrapper = document.createElement('div');
+  wrapper.id = 'loginScreenWrapper';
+  wrapper.innerHTML = html;
+  document.body.appendChild(wrapper);
+  document.getElementById('loginUsername').focus();
+}
+
+function hideLoginScreen() {
+  const wrapper = document.getElementById('loginScreenWrapper');
+  if (wrapper) wrapper.remove();
+}
+
+async function handleLogin(event) {
+  event.preventDefault();
+  
+  const username = document.getElementById('loginUsername').value;
+  const password = document.getElementById('loginPassword').value;
+  const rememberMe = document.getElementById('rememberMe').checked;
+  
+  if (!username || !password) {
+    showLoginError('Username and password required');
+    return;
+  }
+  
+  // Create Base64 auth token
+  authToken = btoa(username + ':' + password);
+  
+  try {
+    // Test the credentials
+    const resp = await fetch('/api/login', {
+      headers: {'Authorization': 'Basic ' + authToken}
+    });
+    
+    if (resp.status === 200) {
+      // Success!
+      if (rememberMe) {
+        localStorage.setItem('weatherbot_auth', authToken);
+      }
+      hideLoginScreen();
+      tryLoadData();  // Start loading dashboard
+    } else if (resp.status === 401) {
+      showLoginError('Invalid credentials');
+      authToken = null;
+    } else {
+      showLoginError('Login failed: ' + resp.status);
+      authToken = null;
+    }
+  } catch (e) {
+    showLoginError('Connection error: ' + e.message);
+    authToken = null;
+  }
+}
+
+function showLoginError(msg) {
+  const el = document.getElementById('loginError');
+  if (el) {
+    el.textContent = msg;
+    el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 4000);
+  }
+}
+
+function handleLogout() {
+  authToken = null;
+  localStorage.removeItem('weatherbot_auth');
+  hideLoginScreen();
+  showLoginScreen();
+}
+
+function updateLogoutButton() {
+  const btn = document.getElementById('logoutBtn');
+  if (btn && authToken) {
+    btn.style.display = 'block';
+  }
+}
+
+async function tryLoadData() {
+  // Check if auth is required on first load
+  if (!authToken && authRequired === false) {
+    const authOk = await checkAuthRequired();
+    if (!authOk && authRequired) return;
+  }
+  
+  updateLogoutButton();
+  loadData();
+}
+
+// Load and check auth on page load
+loadStoredAuth();
+
 const fmt2 = v => (v >= 0 ? '+' : '') + v.toFixed(2);
 const fmtUSD = v => '$' + Math.abs(v).toFixed(2);
 const now = () => new Date().toLocaleTimeString('en-US', {hour12: false});
@@ -322,8 +493,19 @@ function renderCalibration(cal) {
 
 async function loadData() {
   try {
-    const r = await fetch('/api/data?t=' + Date.now());
-    if (!r.ok) throw new Error('API error');
+    const r = await fetch('/api/data?t=' + Date.now(), {
+      headers: getAuthHeaders()
+    });
+    
+    if (r.status === 401) {
+      // Auth expired or required
+      authToken = null;
+      localStorage.removeItem('weatherbot_auth');
+      showLoginScreen();
+      return;
+    }
+    
+    if (!r.ok) throw new Error('API error: ' + r.status);
 
     const d = await r.json();
     document.getElementById('status-dot').className = 'dot';
@@ -400,8 +582,8 @@ async function loadData() {
   }
 }
 
-loadData();
-setInterval(loadData, 8000);
+tryLoadData();
+setInterval(tryLoadData, 8000);
 </script>
 </body>
 </html>

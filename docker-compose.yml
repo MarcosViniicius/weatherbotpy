@@ -1,0 +1,79 @@
+# ════════════════════════════════════════════════════════════
+# WeatherBot v3 — Docker Compose Configuration
+# Production-ready with volume management and auto-restart
+# ════════════════════════════════════════════════════════════
+
+version: '3.9'
+
+services:
+  weatherbot:
+    # Build the image
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    # Container name
+    container_name: weatherbot
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Environment variables from .env file
+    env_file: .env
+    
+    # Port mapping: host:container
+    ports:
+      - "8877:8877"  # Dashboard
+    
+    # Volume mounts
+    volumes:
+      # Persistent data directory
+      - weatherbot-data:/app/data
+      # Optional: logs directory
+      - weatherbot-logs:/app/logs
+    
+    # Resource limits (VPS-friendly)
+    deploy:
+      resources:
+        limits:
+          cpus: '1'            # Max 1 CPU
+          memory: 512M         # Max 512MB RAM
+        reservations:
+          cpus: '0.5'          # Minimum 0.5 CPU reserved
+          memory: 256M         # Minimum 256MB reserved
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"        # Max 10MB per log file
+        max-file: "3"          # Keep 3 files max
+        labels: "service=weatherbot"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8877/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Networks
+    networks:
+      - weatherbot-net
+    
+    # Stdin/TTY for debugging
+    stdin_open: true
+    tty: true
+
+# Named volumes for persistence
+volumes:
+  weatherbot-data:
+    driver: local
+  weatherbot-logs:
+    driver: local
+
+# Networks
+networks:
+  weatherbot-net:
+    driver: bridge
