@@ -128,7 +128,7 @@ def get_metar(city_slug: str) -> float | None:
 
     try:
         url = f"https://aviationweather.gov/api/data/metar?ids={station}&format=json"
-        response = requests.get(url, timeout=(5, 8))
+        response = requests.get(url, timeout=(10, 15))
         if response.status_code != 200:
             metar_cb.record_failure()
             return None
@@ -177,7 +177,7 @@ def get_actual_temp(city_slug: str, date_str: str) -> float | None:
     )
 
     try:
-        data = requests.get(url, timeout=(5, 8)).json()
+        data = requests.get(url, timeout=(10, 15)).json()
         days = data.get("days", [])
         if days and days[0].get("tempmax") is not None:
             return round(float(days[0]["tempmax"]), 1)

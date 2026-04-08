@@ -276,6 +276,13 @@ def scan_and_update() -> tuple[int, int, int]:
                     bid = o.get("bid", o["price"])
                     ask = o.get("ask", o["price"])
                     spread = o.get("spread", 0)
+                    price_mid = o.get("price", (bid + ask) / 2.0)
+
+                    # Filter by REAL liquidity: relative spread must be acceptable
+                    if price_mid > 0:
+                        spread_ratio = spread / price_mid
+                        if spread_ratio > 0.15:  # >15% relative spread = skip
+                            continue
 
                     if volume >= settings.MIN_VOLUME:
                         # Raw probability from model
@@ -286,9 +293,12 @@ def scan_and_update() -> tuple[int, int, int]:
                         # Edge = p - price (correct for binary markets)
                         edge = calc_edge(p, ask)
                         ev = calc_ev(p, ask)
+                        # TRUE edge after costs
+                        from core.math_utils import calc_ev_after_costs
+                        ev_after_costs = calc_ev_after_costs(p, ask, spread)
 
-                        # Filter: need minimum edge AND positive EV
-                        if edge >= settings.MIN_EDGE and ev >= settings.MIN_EV:
+                        # Filter: need minimum edge AND positive EV AFTER COSTS
+                        if edge >= settings.MIN_EDGE and ev_after_costs >= settings.MIN_EV * 0.8:
                             kelly = calc_kelly(p, ask)
 
                             # Late market aggressiveness: boost Kelly 6-18h before event
@@ -312,21 +322,23 @@ def scan_and_update() -> tuple[int, int, int]:
                                     "confidence":    round(conf, 2),
                                     "edge":          round(edge, 4),
                                     "ev":            round(ev, 4),
-                                    "kelly":         round(kelly_adjusted, 4),
-                                    "kelly_raw":     round(kelly, 4),
-                                    "lm_mult":       lm_mult,
-                                    "forecast_temp": forecast_temp,
-                                    "forecast_src":  best_source,
-                                    "sigma":         round(sigma, 2),
-                                    "sigma_base":    round(base_sigma, 2),
-                                    "hours_left":    round(hours, 1),
-                                    "opened_at":     snap.get("ts"),
-                                    "status":        "open",
-                                    "pnl":           None,
-                                    "exit_price":    None,
-                                    "close_reason":  None,
-                                    "closed_at":     None,
-                                }
+                                "ev_after_costs": round(ev_after_costs, 4),
+                                "kelly":         round(kelly_adjusted, 4),
+                                "kelly_raw":     round(kelly, 4),
+                                "lm_mult":       lm_mult,
+                                "forecast_temp": forecast_temp,
+                                "forecast_src":  best_source,
+                                "sigma":         round(sigma, 2),
+                                "sigma_base":    round(base_sigma, 2),
+                                "hours_left":    round(hours, 1),
+                                "opened_at":     snap.get("ts"),
+                                "status":        "open",
+                                "pnl":           None,
+                                "exit_price":    None,
+                                "close_reason":  None,
+                                "closed_at":     None,
+                                "forecast_at_entry": forecast_temp,
+                            }
 
                 if best_signal:
                     # Fetch real ask from Polymarket for accurate entry
@@ -400,7 +412,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             )
                             _notify(msg)
 
-                            # Log prediction for calibration curve
+                            # Log prediction for calibration curve (with execution costs)
                             log_prediction(
                                 city=city_slug, date=date,
                                 p=best_signal["p"], edge=best_signal["edge"],
@@ -408,6 +420,8 @@ def scan_and_update() -> tuple[int, int, int]:
                                 source=best_signal["forecast_src"] or "",
                                 sigma=best_signal["sigma"],
                                 confidence=best_signal["confidence"],
+                                spread=best_signal.get("spread", 0.0),
+                                ev_after_costs=best_signal.get("ev_after_costs", 0.0),
                             )
 
             # Market closed by time
@@ -529,6 +543,15 @@ def monitor_positions() -> int:
         else:
             take_profit = 0.75
 
+        # FORECAST SHIFT: if forecast moved significantly away, close position
+        # (replaces rigid stop-loss)
+        forecast_shift = False
+        if pos.get("forecast_at_entry"):
+            for snap_record in mkt.get("forecast_snapshots", []):
+                if snap_record.get("best") and abs(snap_record["best"] - pos["forecast_at_entry"]) > 2.0:
+                    forecast_shift = True
+                    break
+
         # Trailing
         if current_price >= entry * 1.20 and stop < entry:
             pos["stop_price"] = entry
@@ -537,8 +560,9 @@ def monitor_positions() -> int:
 
         take_triggered = take_profit is not None and current_price >= take_profit
         stop_triggered = current_price <= stop
+        forecast_close = forecast_shift and hours_left < 6  # only close on shift if close to event
 
-        if take_triggered or stop_triggered:
+        if take_triggered or stop_triggered or forecast_close:
             pnl = round((current_price - entry) * pos["shares"], 2)
             balance += pos["cost"] + pnl
             pos["closed_at"] = datetime.now(timezone.utc).isoformat()
@@ -546,6 +570,10 @@ def monitor_positions() -> int:
                 pos["close_reason"] = "take_profit"
                 reason = "TAKE"
                 emoji = "💰"
+            elif forecast_close:
+                pos["close_reason"] = "forecast_shift_close"
+                reason = "FCAST"
+                emoji = "🔄"
             elif current_price < entry:
                 pos["close_reason"] = "stop_loss"
                 reason = "STOP"

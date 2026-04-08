@@ -44,8 +44,8 @@ def get_sigma(city_slug: str, source: str = "ecmwf") -> float:
 
 
 def log_prediction(city: str, date: str, p: float, edge: float, price: float,
-                    source: str, sigma: float, confidence: float):
-    """Log a prediction for later calibration analysis."""
+                    source: str, sigma: float, confidence: float, spread: float = 0.0, ev_after_costs: float = 0.0):
+    """Log a prediction for later calibration analysis (with execution cost tracking)."""
     try:
         if PREDICTIONS_FILE.exists():
             preds = json.loads(PREDICTIONS_FILE.read_text(encoding="utf-8"))
@@ -62,6 +62,8 @@ def log_prediction(city: str, date: str, p: float, edge: float, price: float,
             "source": source,
             "sigma": round(sigma, 2),
             "confidence": round(confidence, 2),
+            "spread": round(spread, 4),
+            "ev_after_costs": round(ev_after_costs, 4),
             "outcome": None,  # filled when resolved
         })
 

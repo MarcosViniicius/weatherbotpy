@@ -82,6 +82,22 @@ def calc_ev(p: float, price: float) -> float:
     return round(p * (1.0 - price) - (1.0 - p) * price, 4)
 
 
+def calc_ev_after_costs(p: float, entry_price: float, spread: float, slippage_frac: float = 0.005) -> float:
+    """
+    TRUE expected value after real execution costs.
+    entry_price: actual ask we pay
+    spread: bid-ask spread observed
+    slippage_frac: additional slippage (default 0.5% for Polymarket)
+    
+    Real cost: (spread/2 + slippage)
+    """
+    if entry_price <= 0 or entry_price >= 1:
+        return 0.0
+    cost = (spread / 2.0) + slippage_frac
+    effective_price = min(entry_price + cost, 0.99)
+    return round(p * (1.0 - effective_price) - (1.0 - p) * effective_price, 4)
+
+
 def calc_kelly(p: float, price: float) -> float:
     """
     Fractional Kelly criterion for binary markets.
@@ -112,28 +128,27 @@ def in_bucket(forecast: float, t_low: float, t_high: float) -> bool:
 def confidence_by_time(hours: float) -> float:
     """
     Confidence multiplier based on hours until event resolution.
-    Forecasts get more reliable as we approach the event.
-
-    Returns a value between 0.70 and 1.0:
-      < 6h  → 1.00 (very reliable)
-      6-12h → 0.97
-      12-24h → 0.93
-      24-48h → 0.85
-      48-72h → 0.78
-      > 72h  → 0.70
+    REDUCED from previous to avoid overconfidence bias.
+    Returns value between 0.50 and 0.80:
+      < 6h  → 0.80 (realistic high)
+      6-12h → 0.75
+      12-24h → 0.70
+      24-48h → 0.60
+      48-72h → 0.55
+      > 72h  → 0.50
     """
     if hours <= 6:
-        return 1.00
+        return 0.80
     elif hours <= 12:
-        return 0.97
+        return 0.75
     elif hours <= 24:
-        return 0.93
-    elif hours <= 48:
-        return 0.85
-    elif hours <= 72:
-        return 0.78
-    else:
         return 0.70
+    elif hours <= 48:
+        return 0.60
+    elif hours <= 72:
+        return 0.55
+    else:
+        return 0.50
 
 
 def forecast_disagreement_sigma(forecasts: list[float], base_sigma: float) -> float:

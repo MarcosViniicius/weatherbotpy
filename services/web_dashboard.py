@@ -57,6 +57,9 @@ def _build_api_data() -> dict:
 
         question = pos.get("question", f"{m.get('city_name', '')} {m['date']} — {bl}-{bh}{unit_sym}")
 
+        spread = pos.get("spread", 0)
+        ev_after_costs = pos.get("ev_after_costs", pos.get("ev", 0))
+        
         positions[mid] = {
             "question": question,
             "location": m.get("city_name", m["city"]),
@@ -67,7 +70,9 @@ def _build_api_data() -> dict:
             "shares": pos["shares"],
             "pnl": unrealized,
             "ev": pos.get("ev", 0),
+            "ev_after_costs": ev_after_costs,
             "edge": pos.get("edge", 0),
+            "spread": spread,
             "kelly_pct": pos.get("kelly", 0),
             "our_prob": pos.get("p", 0),
             "forecast_temp": pos.get("forecast_temp"),

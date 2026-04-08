@@ -147,6 +147,13 @@ body::after{content:'';position:fixed;inset:0;background-image:linear-gradient(r
   </div>
 </div>
 
+<div class="bot-grid">
+  <div class="panel">
+    <div class="card-head"><span class="card-title">Edge Reality Check</span><span class="card-badge" id="edge-badge">LIVE</span></div>
+    <div class="scroll" id="edge-log"><div class="empty">Analyzing spreads...</div></div>
+  </div>
+</div>
+
 <div class="footer">
   <div class="footer-text">WeatherBet v3 · Live API · Refreshes every 8s</div>
   <div class="mode-badge sim" id="footer-mode">⚡ SIMULATION</div>
@@ -259,6 +266,36 @@ function renderEvLog(trades) {
   }).join('');
 }
 
+function renderEdgeReality(positions) {
+  const el = document.getElementById('edge-log');
+  const openPos = Object.entries(positions || {})
+    .filter(([_, p]) => p.status === 'open')
+    .sort((a, b) => (b[1].opened_at || '').localeCompare(a[1].opened_at || ''));
+  
+  if (!openPos.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
+  
+  el.innerHTML = openPos.map(([key, p]) => {
+    const ev_theo = (p.ev || 0);
+    const ev_real = (p.ev_after_costs || 0);
+    const gap = ev_theo > 0 ? ((ev_theo - ev_real) / ev_theo * 100) : 0;
+    const gapColor = gap > 50 ? '#ff2244' : gap > 25 ? '#ffcc00' : '#00ff41';
+    const spreadPercent = p.spread && p.entry_price ? ((p.spread / p.entry_price) * 100) : 0;
+    const time = (p.opened_at || '').substr(11, 5) || '—';
+    
+    return `<div style="padding:9px 14px;border-bottom:1px solid #0a2a0a;font-size:9px;">
+      <div style="color:#2a5a2a">${time} · ${p.location || ''}</div>
+      <div style="color:#88ff88;margin-top:3px">
+        EV Theory: <span style="color:#00ff41">${(ev_theo * 100).toFixed(2)}%</span> &nbsp;|&nbsp; 
+        EV Real: <span style="color:#ffaa00">${(ev_real * 100).toFixed(2)}%</span>
+      </div>
+      <div style="margin-top:3px">
+        Leakage: <span style="color:${gapColor};font-weight:bold">${gap.toFixed(1)}%</span> &nbsp;|&nbsp; 
+        Spread: <span style="color:#ff8800">${spreadPercent.toFixed(1)}%</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 function renderCalibration(cal) {
   const el = document.getElementById('cal-log');
   if (!cal || cal.total === 0) { el.innerHTML = '<div class="empty">Waiting for resolutions...</div>'; return; }
@@ -353,6 +390,7 @@ async function loadData() {
     renderPositions(positions);
     renderTrades(trades);
     renderEvLog(trades);
+    renderEdgeReality(positions);
     renderCalibration(cal);
 
   } catch (e) {

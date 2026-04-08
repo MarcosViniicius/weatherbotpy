@@ -27,7 +27,7 @@ def get_event(city_slug: str, month: str, day: int, year: int) -> dict | None:
 
     slug = f"highest-temperature-in-{city_slug}-on-{month}-{day}-{year}"
     try:
-        r = requests.get(f"{GAMMA_BASE}/events?slug={slug}", timeout=(5, 8))
+        r = requests.get(f"{GAMMA_BASE}/events?slug={slug}", timeout=(15, 20))
         r.raise_for_status()
         data = r.json()
         gamma_cb.record_success()
@@ -45,7 +45,7 @@ def get_market_price(market_id: str) -> float | None:
     if not gamma_cb.can_execute():
         return None
     try:
-        r = requests.get(f"{GAMMA_BASE}/markets/{market_id}", timeout=(3, 5))
+        r = requests.get(f"{GAMMA_BASE}/markets/{market_id}", timeout=(10, 15))
         r.raise_for_status()
         data = r.json()
         gamma_cb.record_success()
@@ -64,7 +64,7 @@ def get_market_detail(market_id: str) -> dict | None:
     if not gamma_cb.can_execute():
         return None
     try:
-        r = requests.get(f"{GAMMA_BASE}/markets/{market_id}", timeout=(3, 5))
+        r = requests.get(f"{GAMMA_BASE}/markets/{market_id}", timeout=(10, 15))
         r.raise_for_status()
         gamma_cb.record_success()
         return r.json()
