@@ -9,6 +9,7 @@ import asyncio
 import logging
 import base64
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import urlsplit
 from pathlib import Path
 from threading import Thread
 from datetime import datetime, timezone
@@ -196,8 +197,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.wfile.write(b"Authentication required")
 
     def do_GET(self):
+        request_path = urlsplit(self.path).path
+
         # Login endpoint (no auth required)
-        if self.path.startswith("/api/login"):
+        if request_path.startswith("/api/login"):
             try:
                 auth_header = self.headers.get("Authorization")
                 if not _check_auth(auth_header):
@@ -215,7 +218,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
 
         # API endpoint
-        if self.path.startswith("/api/data"):
+        if request_path.startswith("/api/data"):
             try:
                 # Check authentication
                 auth_header = self.headers.get("Authorization")
@@ -243,14 +246,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     pass
             return
 
-        # Dashboard page (root or /dashboard)
-        if self.path in ("/", "/dashboard", "/dashboard.html"):
+        # Protect dashboard routes and any HTML file route.
+        # Using urlsplit(path).path avoids bypass with query strings such as /dashboard.html?v=1
+        if request_path in ("/", "/dashboard", "/dashboard.html", "/index.html") or request_path.endswith(".html"):
             # Check authentication for dashboard page
             auth_header = self.headers.get("Authorization")
             if not _check_auth(auth_header):
                 return self._send_auth_required()
-            
-            self.path = "/dashboard.html"
+
+            if request_path in ("/", "/dashboard", "/index.html"):
+                self.path = "/dashboard.html"
 
         # Serve static files normally
         super().do_GET()
