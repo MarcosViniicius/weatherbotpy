@@ -27,10 +27,10 @@ services:
     
     # Volume mounts
     volumes:
-      # Persistent data directory
-      - weatherbot-data:/app/data
-      # Optional: logs directory
-      - weatherbot-logs:/app/logs
+      # Persistent data directory — bind mount to local folder
+      - ./data:/app/data
+      # Optional: logs directory — bind mount to local folder
+      - ./logs:/app/logs
     
     # Resource limits (VPS-friendly)
     deploy:
@@ -65,13 +65,6 @@ services:
     # Stdin/TTY for debugging
     stdin_open: true
     tty: true
-
-# Named volumes for persistence
-volumes:
-  weatherbot-data:
-    driver: local
-  weatherbot-logs:
-    driver: local
 
 # Networks
 networks:

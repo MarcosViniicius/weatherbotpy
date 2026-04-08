@@ -20,7 +20,7 @@ logger = logging.getLogger("weatherbet.dashboard")
 
 _server: HTTPServer | None = None
 _thread: Thread | None = None
-DASHBOARD_PORT = int(getattr(settings, 'DASHBOARD_PORT', 8877))
+DASHBOARD_PORT = settings.DASHBOARD_PORT
 
 
 # ═══════════════════════════════════════════════════════════
@@ -29,8 +29,7 @@ DASHBOARD_PORT = int(getattr(settings, 'DASHBOARD_PORT', 8877))
 
 def _is_auth_enabled() -> bool:
     """Check if authentication is enabled."""
-    auth_enabled = getattr(settings, 'DASHBOARD_AUTH_ENABLED', 'false').lower()
-    return auth_enabled in ('true', '1', 'yes', 'on')
+    return settings.DASHBOARD_AUTH_ENABLED
 
 
 def _check_auth(auth_header: str | None) -> bool:
@@ -51,8 +50,8 @@ def _check_auth(auth_header: str | None) -> bool:
         username, password = decoded.split(':', 1)
         
         # Check against settings
-        expected_user = getattr(settings, 'DASHBOARD_USERNAME', 'admin')
-        expected_pass = getattr(settings, 'DASHBOARD_PASSWORD', 'changeme')
+        expected_user = settings.DASHBOARD_USERNAME
+        expected_pass = settings.DASHBOARD_PASSWORD
         
         return username == expected_user and password == expected_pass
     except Exception:
@@ -271,7 +270,7 @@ def start_dashboard(port: int = DASHBOARD_PORT):
         _thread.start()
         
         # Determine public URL
-        public_url = getattr(settings, 'DASHBOARD_PUBLIC_URL', '').strip()
+        public_url = settings.DASHBOARD_PUBLIC_URL.strip() if settings.DASHBOARD_PUBLIC_URL else ''
         if public_url:
             # User specified a public URL/IP for VPS access
             logger.info("[DASH] Dashboard running at http://%s:%d (local: http://localhost:%d)", public_url, port, port)

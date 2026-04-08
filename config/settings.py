@@ -50,11 +50,23 @@ POLYMARKET_CHAIN_ID = 137  # Polygon
 POLYMARKET_PRIVATE_KEY = _env("POLYMARKET_PRIVATE_KEY")
 POLYMARKET_FUNDER = _env("POLYMARKET_FUNDER")
 POLYMARKET_SIGNATURE_TYPE = _env_int("POLYMARKET_SIGNATURE_TYPE", 0)
+POLYMARKET_TIMEOUT = _env_int("POLYMARKET_TIMEOUT", 15)
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 
 # ── Weather APIs ─────────────────────────────────────────
 VC_KEY = _env("VC_KEY")
+WEATHER_TIMEOUT = _env_int("WEATHER_TIMEOUT", 15)
+
+# ── Dashboard Configuration ──────────────────────────────
+DASHBOARD_PORT = _env_int("DASHBOARD_PORT", 8877)
+DASHBOARD_AUTH_ENABLED = _env("DASHBOARD_AUTH_ENABLED", "false").lower() in ("true", "1", "yes", "on")
+DASHBOARD_USERNAME = _env("DASHBOARD_USERNAME", "admin")
+DASHBOARD_PASSWORD = _env("DASHBOARD_PASSWORD", "changeme")
+DASHBOARD_PUBLIC_URL = _env("DASHBOARD_PUBLIC_URL", "")
+
+# ── Logging Configuration ────────────────────────────────
+LOG_LEVEL = _env("LOG_LEVEL", "INFO").upper()
 
 # ── Risk Parameters ──────────────────────────────────────
 BALANCE = _env_float("BALANCE", 20.0)
