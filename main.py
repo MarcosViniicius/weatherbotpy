@@ -8,6 +8,7 @@ If TELEGRAM_TOKEN is not configured, runs in headless mode (scheduler only).
 import sys
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 # Ensure project root is on sys.path
@@ -29,6 +30,33 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("weatherbet")
+
+
+# ── Single Instance Lock ──────────────────────────────────
+def _check_single_instance():
+    """Ensure only one bot instance is running. Remove stale lockfile on restart."""
+    lock_file = Path("/tmp/weatherbot.lock")
+    
+    if lock_file.exists():
+        try:
+            pid = int(lock_file.read_text().strip())
+            # Check if process still exists
+            if os.path.exists(f"/proc/{pid}"):
+                logger.error(
+                    "[LOCK] Another bot instance is already running (PID %d). "
+                    "Run: pkill -f 'python main.py'", pid
+                )
+                sys.exit(1)
+            else:
+                # Stale lock file — remove it
+                lock_file.unlink()
+                logger.info("[LOCK] Removed stale lock file (process %d not found)", pid)
+        except Exception:
+            pass
+    
+    # Create new lock file
+    lock_file.write_text(str(os.getpid()))
+    logger.info("[LOCK] Instance lock acquired (PID %d)", os.getpid())
 
 
 def _print_banner():
@@ -82,10 +110,22 @@ async def _post_shutdown(app):
     """Called on graceful shutdown."""
     stop_scheduler()
     stop_dashboard()
+    
+    # Clean up lock file
+    lock_file = Path("/tmp/weatherbot.lock")
+    if lock_file.exists():
+        try:
+            lock_file.unlink()
+        except Exception:
+            pass
+    
     logger.info("[BOT] Scheduler stopped")
 
 
 def main():
+    # Check single instance
+    _check_single_instance()
+    
     # Load calibration data
     load_cal()
 
@@ -109,10 +149,36 @@ def main():
         app.post_shutdown = _post_shutdown
 
         logger.info("[MAIN] Starting Telegram polling + scheduler...")
-        app.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=["message"],
-        )
+        
+        # Add error handler for Telegram conflicts
+        async def telegram_error_handler(update, context):
+            """Handle errors from Telegram updates."""
+            try:
+                raise context.error
+            except Exception as e:
+                error_msg = str(e)
+                if "Conflict" in error_msg and "getUpdates" in error_msg:
+                    logger.warning(
+                        "[BOT] Telegram getUpdates conflict detected. "
+                        "This is expected if you have multiple instances. "
+                        "Ignoring and continuing..."
+                    )
+                else:
+                    logger.error("[BOT] Telegram error: %s", e)
+        
+        if hasattr(app, 'add_error_handler'):
+            app.add_error_handler(telegram_error_handler)
+        
+        try:
+            app.run_polling(
+                drop_pending_updates=True,
+                allowed_updates=["message"],
+            )
+        except KeyboardInterrupt:
+            logger.info("[MAIN] Keyboard interrupt received")
+        finally:
+            # Clean up
+            _post_shutdown(app)
 
 
 if __name__ == "__main__":
