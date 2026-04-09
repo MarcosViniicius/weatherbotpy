@@ -469,10 +469,10 @@ def scan_and_update() -> tuple[int, int, int]:
                             logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f min=%.4f", city_slug, date, o["market_id"], ask, thresholds["min_price"])
                             continue
 
-                        spread_ratio = spread / max(ask, 0.0001)
-                        if spread_ratio > thresholds["max_relative_spread"]:
+                        spread_to_ask_ratio = spread / max(ask, 0.0001)
+                        if spread_to_ask_ratio > thresholds["max_relative_spread"]:
                             cycle_stats["discard_reasons"]["spread_relative"] += 1
-                            logger.info("[DISCARD] reason=spread_relative city=%s date=%s market=%s spread_ratio=%.4f max=%.4f", city_slug, date, o["market_id"], spread_ratio, thresholds["max_relative_spread"])
+                            logger.info("[DISCARD] reason=spread_relative city=%s date=%s market=%s spread_ratio=%.4f max=%.4f", city_slug, date, o["market_id"], spread_to_ask_ratio, thresholds["max_relative_spread"])
                             continue
                         if volume < thresholds["min_volume"]:
                             cycle_stats["discard_reasons"]["volume"] += 1
@@ -503,7 +503,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             logger.info("[DISCARD] reason=ev city=%s date=%s market=%s edge_adj=%+.4f net_ev=%+.4f min=%+.4f", city_slug, date, o["market_id"], edge_adjusted, ev_after_costs, thresholds["min_edge"])
                             continue
 
-                        kelly = calc_kelly(p, ask, adaptive_kelly_fraction)
+                        kelly = calc_kelly(p, ask, kelly_fraction=adaptive_kelly_fraction)
                         lm_mult = late_market_multiplier(hours)
                         edge_size_mult = _edge_size_multiplier(edge_adjusted)
                         kelly_adjusted = min(kelly * lm_mult * sigma_size_mult * edge_size_mult, 0.25)
@@ -857,7 +857,10 @@ def monitor_positions() -> int:
             and current_exec_edge >= (entry_exec_edge + settings.SCALE_IN_EDGE_STEP)
             and int(pos.get("entries_count", 1) or 1) < 2
         ):
-            max_position_cost = max(0.0, settings.MAX_BET * settings.MAX_POSITION_MULTIPLIER)
+            max_position_cost = min(
+                max(0.0, settings.MAX_BET * settings.MAX_POSITION_MULTIPLIER),
+                max(0.0, float(pos.get("cost", 0.0)) + max(0.0, balance)),
+            )
             remaining_cap = max(0.0, max_position_cost - float(pos.get("cost", 0.0)))
             scale_cost = min(remaining_cap, max(0.0, float(pos.get("cost", 0.0)) * 0.35), max(0.0, balance * 0.15))
             scale_cost = round(scale_cost, 2)

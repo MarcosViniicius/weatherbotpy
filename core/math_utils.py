@@ -107,8 +107,8 @@ def calc_ev_after_costs(p: float, entry_price: float, spread: float, slippage_fr
     """
     TRUE expected value after real execution costs.
     entry_price: actual ask we pay
-    spread: bid-ask spread observed
-    slippage_frac: additional slippage (default 0.5% for Polymarket)
+    spread: bid-ask spread observed (absolute price points, e.g. 0.02)
+    slippage_frac: additional slippage in absolute price points (default 0.005)
     
     Real cost: (spread/2 + slippage)
     """
