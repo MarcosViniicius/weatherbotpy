@@ -82,6 +82,27 @@ def calc_ev(p: float, price: float) -> float:
     return round(p * (1.0 - price) - (1.0 - p) * price, 4)
 
 
+def estimate_slippage(spread: float, max_slippage: float = 0.02) -> float:
+    """
+    Estimate effective slippage as a function of spread/liquidity quality.
+    Keeps value bounded by configured max_slippage.
+    """
+    spread = max(0.0, float(spread))
+    cap = max(0.0, float(max_slippage))
+    if cap == 0:
+        return 0.0
+    # Base 0.25% + 25% of spread, capped for safety.
+    return round(min(cap, 0.0025 + (spread * 0.25)), 4)
+
+
+def calc_edge_after_costs(p: float, entry_price: float, spread: float, slippage_frac: float = 0.005) -> float:
+    """Execution-adjusted edge: p - (price + slippage + spread/2)."""
+    if entry_price <= 0 or entry_price >= 1:
+        return 0.0
+    effective_price = min(entry_price + max(0.0, slippage_frac) + max(0.0, spread) / 2.0, 0.99)
+    return round(p - effective_price, 4)
+
+
 def calc_ev_after_costs(p: float, entry_price: float, spread: float, slippage_frac: float = 0.005) -> float:
     """
     TRUE expected value after real execution costs.
@@ -93,12 +114,12 @@ def calc_ev_after_costs(p: float, entry_price: float, spread: float, slippage_fr
     """
     if entry_price <= 0 or entry_price >= 1:
         return 0.0
-    cost = (spread / 2.0) + slippage_frac
+    cost = (max(0.0, spread) / 2.0) + max(0.0, slippage_frac)
     effective_price = min(entry_price + cost, 0.99)
     return round(p * (1.0 - effective_price) - (1.0 - p) * effective_price, 4)
 
 
-def calc_kelly(p: float, price: float) -> float:
+def calc_kelly(p: float, price: float, kelly_fraction: float | None = None) -> float:
     """
     Fractional Kelly criterion for binary markets.
     Full Kelly: f* = (p/price - 1) × price / (1 - price)
@@ -109,7 +130,8 @@ def calc_kelly(p: float, price: float) -> float:
         return 0.0
     # Full Kelly for binary outcome: (p - price) / (1 - price)
     f = (p - price) / (1.0 - price)
-    return round(min(max(0.0, f) * settings.KELLY_FRACTION, 1.0), 4)
+    frac = settings.KELLY_FRACTION if kelly_fraction is None else float(kelly_fraction)
+    return round(min(max(0.0, f) * max(0.0, frac), 1.0), 4)
 
 
 def bet_size(kelly: float, balance: float) -> float:
@@ -151,6 +173,20 @@ def confidence_by_time(hours: float) -> float:
         return 0.65
 
 
+def edge_time_factor(hours: float) -> float:
+    """
+    Time-based edge quality factor.
+    Prioritizes 6h-24h window and discounts long horizons.
+    """
+    if 6 <= hours <= 24:
+        return 1.10
+    if 24 < hours <= 36:
+        return 1.00
+    if 36 < hours <= 48:
+        return 0.90
+    return 0.80
+
+
 def forecast_disagreement_sigma(forecasts: list[float], base_sigma: float) -> float:
     """
     Adjust sigma based on disagreement between forecast models.
@@ -166,6 +202,19 @@ def forecast_disagreement_sigma(forecasts: list[float], base_sigma: float) -> fl
     std_dev = math.sqrt(variance)
 
     return base_sigma + std_dev
+
+
+def disagreement_size_multiplier(base_sigma: float, sigma_real: float) -> float:
+    """Reduce position size when model disagreement widens sigma."""
+    base = max(0.1, float(base_sigma))
+    ratio = max(0.0, (float(sigma_real) - base) / base)
+    if ratio <= 0.10:
+        return 1.00
+    if ratio <= 0.25:
+        return 0.90
+    if ratio <= 0.50:
+        return 0.75
+    return 0.60
 
 
 def late_market_multiplier(hours: float) -> float:

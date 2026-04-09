@@ -5,12 +5,17 @@
 balance = 20.0
 max_bet = 2.0
 min_edge = 0.05
+min_price = 0.08
 max_price = 0.60
 min_volume = 200
+max_relative_spread = 0.15
 min_hours = 2.0
 max_hours = 72.0
 kelly_fraction = 0.25
 max_slippage = 0.02
+edge_decay_exit_delta = 0.03
+scale_in_edge_step = 0.02
+max_position_multiplier = 1.8
 scan_interval = 900
 calibration_min = 50
 relax_stage = 1
