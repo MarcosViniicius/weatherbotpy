@@ -89,7 +89,8 @@ def get_event(city_slug: str, month: str, day: int, year: int) -> dict | None:
                         return event
                 if len(data) > 0:
                     return data[0]
-        except requests.RequestException:
+        except requests.RequestException as e:
+            logger.warning("[GAMMA] Slug lookup failed slug=%s city=%s date=%s-%s-%s error=%s", slug, city_slug, year, month, day, e)
             gamma_cb.record_failure()
             raise
 

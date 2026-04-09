@@ -17,7 +17,7 @@ from config.locations import LOCATIONS
 from connectors import polymarket_read as pm_read
 from connectors import polymarket_trade as pm_trade
 from core.math_utils import (
-    bucket_prob, calc_edge, calc_ev, calc_ev_after_costs, calc_kelly, bet_size, in_bucket,
+    bucket_prob, calc_edge, calc_ev_after_costs, calc_kelly, bet_size, in_bucket,
     confidence_by_time, forecast_disagreement_sigma, late_market_multiplier,
 )
 from core.calibration import get_sigma, run_calibration, load_cal, log_prediction, record_outcome
@@ -481,9 +481,9 @@ def scan_and_update() -> tuple[int, int, int]:
                                 best_signal["bid_at_entry"] = real_bid
                                 best_signal["spread"] = real_spread
                                 best_signal["shares"] = round(best_signal["cost"] / real_ask, 2)
-                                # Recalculate with real price
+                                # Recalculate with real execution data (keep legacy `ev` key for compatibility)
                                 best_signal["edge"] = round(calc_edge(best_signal["p"], real_ask), 4)
-                                real_ev = round(calc_ev(best_signal["p"], real_ask), 4)
+                                real_ev = round(calc_ev_after_costs(best_signal["p"], real_ask, real_spread), 4)
                                 best_signal["ev"] = real_ev
                                 best_signal["net_ev"] = real_ev
                                 best_signal["ev_after_costs"] = real_ev
