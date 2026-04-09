@@ -17,6 +17,8 @@ _scan_task: asyncio.Task | None = None
 _notifications_enabled = False
 _notify_interval = 600  # 10 min default
 _last_notify_time = ""  # ISO timestamp of last notification
+BASE_SCAN_BACKOFF_SECONDS = 60
+MAX_SCAN_BACKOFF_SECONDS = 900
 
 
 def set_notifications(enabled: bool, interval: int = 600):
@@ -133,6 +135,8 @@ async def _scan_loop(notify_func):
 
     last_full_scan = 0.0
     last_notification = 0.0
+    consecutive_scan_failures = 0
+    next_scan_allowed_at = 0.0
 
     await notify_func("🟢 WeatherBet scheduler started")
 
@@ -140,6 +144,10 @@ async def _scan_loop(notify_func):
         settings.reload_risk_config()
         now_ts = asyncio.get_event_loop().time()
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if now_ts < next_scan_allowed_at:
+            await asyncio.sleep(min(settings.MONITOR_INTERVAL, max(1.0, next_scan_allowed_at - now_ts)))
+            continue
 
         if now_ts - last_full_scan >= settings.SCAN_INTERVAL:
             logger.info("[%s] Full scan...", now_str)
@@ -157,12 +165,23 @@ async def _scan_loop(notify_func):
                     f"New: {new_pos} | Closed: {closed} | Resolved: {resolved}"
                 )
                 await notify_func(summary)
+                consecutive_scan_failures = 0
+                next_scan_allowed_at = 0.0
                 last_full_scan = asyncio.get_event_loop().time()
 
             except Exception as e:
+                consecutive_scan_failures += 1
+                exponent = min(max(0, consecutive_scan_failures - 1), 10)
+                backoff = min(
+                    BASE_SCAN_BACKOFF_SECONDS * (2 ** exponent),
+                    MAX_SCAN_BACKOFF_SECONDS,
+                )
+                next_scan_allowed_at = asyncio.get_event_loop().time() + backoff
                 logger.error("[SCAN] Error: %s", e)
-                await notify_func(f"🚨 Scan error: {e}")
-                await asyncio.sleep(60)
+                await notify_func(
+                    f"🚨 Scan error: {e}\n"
+                    f"Failure #{consecutive_scan_failures} — retrying in {int(backoff)}s."
+                )
                 continue
         else:
             # Quick position monitor

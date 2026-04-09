@@ -5,6 +5,7 @@ Only called in production mode.
 """
 
 import logging
+import inspect
 from config import settings
 from connectors.resilience import retry_with_backoff, clob_cb
 
@@ -41,6 +42,92 @@ def _get_client():
         logger.error("[CLOB] Failed to initialise client: %s", e)
         _client = None
         return None
+
+
+def _extract_numeric_balance(payload, depth: int = 0) -> float | None:
+    """Best-effort extraction of a wallet balance from nested API payloads."""
+    if depth > 4:
+        return None
+    if payload is None:
+        return None
+    if isinstance(payload, (int, float)):
+        return float(payload)
+    if isinstance(payload, str):
+        try:
+            return float(payload)
+        except ValueError:
+            return None
+    if isinstance(payload, dict):
+        for key in (
+            "balance", "available", "total", "amount", "usdc", "usdc_balance",
+            "collateral", "value", "asset_balance", "numericBalance", "numeric_balance",
+        ):
+            if key in payload:
+                parsed = _extract_numeric_balance(payload.get(key), depth + 1)
+                if parsed is not None:
+                    return parsed
+        for value in payload.values():
+            parsed = _extract_numeric_balance(value, depth + 1)
+            if parsed is not None:
+                return parsed
+    if isinstance(payload, (list, tuple)):
+        for item in payload:
+            parsed = _extract_numeric_balance(item, depth + 1)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _has_required_positional_params(method) -> bool:
+    """Return True if method requires positional args without defaults."""
+    try:
+        sig = inspect.signature(method)
+    except Exception:
+        return False
+    for p in sig.parameters.values():
+        if (
+            p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            and p.default is inspect.Parameter.empty
+        ):
+            return True
+    return False
+
+
+@retry_with_backoff(max_retries=2, base_delay=1.0)
+def get_wallet_balance() -> float | None:
+    """
+    Fetch wallet collateral balance from CLOB API.
+    Returns USDC-equivalent balance or None on failure.
+    """
+    client = _get_client()
+    if client is None:
+        return None
+
+    calls = []
+    if hasattr(client, "get_balance_allowance"):
+        calls.append(("get_balance_allowance", client.get_balance_allowance))
+    if hasattr(client, "get_collateral"):
+        calls.append(("get_collateral", client.get_collateral))
+    if hasattr(client, "get_usdc_balance"):
+        calls.append(("get_usdc_balance", client.get_usdc_balance))
+    if hasattr(client, "get_balance"):
+        calls.append(("get_balance", client.get_balance))
+
+    for name, method in calls:
+        if _has_required_positional_params(method):
+            continue
+        try:
+            payload = method()
+            value = _extract_numeric_balance(payload)
+            if value is not None:
+                clob_cb.record_success()
+                return max(0.0, round(float(value), 2))
+        except Exception as e:
+            clob_cb.record_failure()
+            logger.warning("[CLOB] %s failed while reading wallet balance: %s", name, e)
+
+    logger.warning("[CLOB] Could not read wallet balance from client API")
+    return None
 
 
 # ═══════════════════════════════════════════════════════════

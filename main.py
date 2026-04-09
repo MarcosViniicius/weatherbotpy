@@ -153,6 +153,25 @@ def main():
     # Load calibration data
     load_cal()
 
+    # Production readiness validation with safe fallback
+    if mode_manager.get_mode() == "production":
+        missing, warnings = settings.validate_production_readiness()
+        if warnings:
+            logger.warning("[PRODUCTION] Readiness warnings: %s", "; ".join(warnings))
+        if missing:
+            logger.error(
+                "[PRODUCTION] Missing required config: %s. "
+                "Falling back to simulation mode for safety.",
+                ", ".join(missing),
+            )
+            mode_manager.set_mode("simulation")
+        elif settings.PRODUCTION_STRICT_VALIDATION and warnings:
+            logger.error(
+                "[PRODUCTION] Strict validation enabled and warnings found. "
+                "Falling back to simulation mode."
+            )
+            mode_manager.set_mode("simulation")
+
     # Start web dashboard
     start_dashboard(DASHBOARD_PORT)
 
