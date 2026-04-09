@@ -31,6 +31,7 @@ logger = logging.getLogger("weatherbet.strategy")
 # Adjacent buckets are allowed but receive an 8% confidence haircut to keep
 # the primary forecast bucket prioritized while still recovering near-boundary opportunities.
 ADJACENT_BUCKET_CONFIDENCE_PENALTY = 0.92
+MIN_PRICE_DIVISOR = 0.0001
 
 # Will be set by the scheduler to push Telegram notifications
 _notify_func = None
@@ -469,7 +470,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f range=[%.4f,%.4f)", city_slug, date, o["market_id"], ask, thresholds["min_price"], thresholds["max_price"])
                             continue
 
-                        relative_spread = spread / max(ask, 0.0001)
+                        relative_spread = spread / max(ask, MIN_PRICE_DIVISOR)
                         if relative_spread > thresholds["max_relative_spread"]:
                             cycle_stats["discard_reasons"]["spread_relative"] += 1
                             logger.info("[DISCARD] reason=spread_relative city=%s date=%s market=%s spread_ratio=%.4f max=%.4f", city_slug, date, o["market_id"], relative_spread, thresholds["max_relative_spread"])
@@ -564,7 +565,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             real_ask = float(mdata.get("bestAsk", best_signal["entry_price"]))
                             real_bid = float(mdata.get("bestBid", best_signal["bid_at_entry"]))
                             real_spread = round(max(0.0, real_ask - real_bid), 4)
-                            real_relative_spread = real_spread / max(real_ask, 0.0001)
+                            real_relative_spread = real_spread / max(real_ask, MIN_PRICE_DIVISOR)
                             real_slippage = estimate_slippage(real_spread, thresholds["max_slippage"])
                             if real_ask < thresholds["min_price"] or real_ask >= thresholds["max_price"]:
                                 cycle_stats["discard_reasons"]["price"] += 1
@@ -894,7 +895,9 @@ def monitor_positions() -> int:
                     total_shares = round(old_shares + scale_shares, 2)
                     total_cost = round(old_cost + scale_cost, 2)
                     if total_shares > 0:
-                        weighted_entry = ((entry * old_shares) + (current_ask * scale_shares)) / total_shares
+                        old_position_value = entry * old_shares
+                        new_position_value = current_ask * scale_shares
+                        weighted_entry = (old_position_value + new_position_value) / total_shares
                         pos["entry_price"] = round(weighted_entry, 4)
                     pos["shares"] = total_shares
                     pos["cost"] = total_cost
