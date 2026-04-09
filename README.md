@@ -72,11 +72,13 @@ Exemplos:
 ```
 
 ## Arquivos de risco (TOML)
-Fonte principal: `risk.toml` na raiz.
+Fonte canônica: `risk.toml` na raiz.
+Não edite `config/risk.toml` (arquivo legado/compatibilidade).
 
 Chaves:
 - `balance`
 - `max_bet`
+- `min_ev`
 - `min_edge`
 - `max_price`
 - `min_volume`

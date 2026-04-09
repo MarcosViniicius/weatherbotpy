@@ -20,8 +20,6 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 logger = logging.getLogger("weatherbet.settings")
 
-_legacy_divergence_warned = False
-
 
 def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
@@ -51,7 +49,6 @@ STATE_FILE = DATA_DIR / "state.json"
 CALIBRATION_FILE = DATA_DIR / "calibration.json"
 MODE_FILE = PROJECT_ROOT / "config" / "mode.json"
 RISK_CONFIG_FILE = PROJECT_ROOT / "risk.toml"
-LEGACY_RISK_CONFIG_FILE = PROJECT_ROOT / "config" / "risk.toml"
 
 # ── Telegram ─────────────────────────────────────────────
 TELEGRAM_TOKEN = _env("TELEGRAM_TOKEN")
@@ -143,51 +140,8 @@ def _write_risk_toml(risk: dict) -> None:
     RISK_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     RISK_CONFIG_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    # Keep legacy path synchronized to reduce operator confusion.
-    try:
-        LEGACY_RISK_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        LEGACY_RISK_CONFIG_FILE.write_text(RISK_CONFIG_FILE.read_text(encoding="utf-8"), encoding="utf-8")
-    except Exception as e:
-        logger.warning("[RISK] Could not sync legacy risk file: %s", e)
-
-
-def _migrate_legacy_risk_file_if_needed() -> None:
-    """If only legacy config/risk.toml exists, copy it to root risk.toml."""
-    if RISK_CONFIG_FILE.exists():
-        return
-    if not LEGACY_RISK_CONFIG_FILE.exists():
-        return
-    try:
-        RISK_CONFIG_FILE.write_text(LEGACY_RISK_CONFIG_FILE.read_text(encoding="utf-8"), encoding="utf-8")
-        logger.info("[RISK] Migrated legacy config/risk.toml to root risk.toml")
-    except Exception:
-        # Ignore migration failures; loader will fallback to defaults
-        logger.exception("[RISK] Failed migrating legacy risk TOML")
-
-
-def _warn_if_root_legacy_diverge() -> None:
-    global _legacy_divergence_warned
-    if not RISK_CONFIG_FILE.exists() or not LEGACY_RISK_CONFIG_FILE.exists():
-        return
-    try:
-        root_txt = RISK_CONFIG_FILE.read_text(encoding="utf-8").strip()
-        legacy_txt = LEGACY_RISK_CONFIG_FILE.read_text(encoding="utf-8").strip()
-        if root_txt != legacy_txt:
-            if not _legacy_divergence_warned:
-                logger.warning(
-                    "[RISK] Found divergent TOMLs. Root file '%s' is canonical. Syncing legacy '%s'.",
-                    RISK_CONFIG_FILE,
-                    LEGACY_RISK_CONFIG_FILE,
-                )
-                _legacy_divergence_warned = True
-            LEGACY_RISK_CONFIG_FILE.write_text(root_txt + "\n", encoding="utf-8")
-    except Exception as e:
-        logger.warning("[RISK] Could not compare root/legacy TOML files: %s", e)
-
 
 def _load_risk_toml() -> dict:
-    _migrate_legacy_risk_file_if_needed()
-    _warn_if_root_legacy_diverge()
 
     if not RISK_CONFIG_FILE.exists():
         _write_risk_toml(_DEFAULT_RISK_CONFIG)
