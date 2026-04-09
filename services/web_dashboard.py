@@ -8,7 +8,7 @@ import json
 import asyncio
 import logging
 import base64
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlsplit
 from pathlib import Path
 from threading import Thread
@@ -19,7 +19,7 @@ import socket
 
 logger = logging.getLogger("weatherbet.dashboard")
 
-_server: HTTPServer | None = None
+_server: ThreadingHTTPServer | None = None
 _thread: Thread | None = None
 DASHBOARD_PORT = settings.DASHBOARD_PORT
 
@@ -270,7 +270,8 @@ def start_dashboard(port: int = DASHBOARD_PORT):
     global _server, _thread
 
     try:
-        _server = HTTPServer(("0.0.0.0", port), DashboardHandler)
+        ThreadingHTTPServer.allow_reuse_address = True
+        _server = ThreadingHTTPServer(("0.0.0.0", port), DashboardHandler)
         _thread = Thread(target=_server.serve_forever, daemon=True)
         _thread.start()
         

@@ -7,11 +7,13 @@ import re
 import json
 import logging
 import requests
-from connectors.resilience import retry_with_backoff, gamma_cb
+from config import settings
+from connectors.resilience import retry_with_backoff, gamma_cb, get_http_session
 
 logger = logging.getLogger("weatherbet.polymarket_read")
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
+_gamma_session = get_http_session("gamma")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -27,7 +29,11 @@ def get_event(city_slug: str, month: str, day: int, year: int) -> dict | None:
 
     slug = f"highest-temperature-in-{city_slug}-on-{month}-{day}-{year}"
     try:
-        r = requests.get(f"{GAMMA_BASE}/events?slug={slug}", timeout=(15, 20))
+        r = _gamma_session.get(
+            f"{GAMMA_BASE}/events",
+            params={"slug": slug},
+            timeout=(settings.POLYMARKET_TIMEOUT, settings.POLYMARKET_TIMEOUT + 5),
+        )
         r.raise_for_status()
         data = r.json()
         gamma_cb.record_success()
@@ -45,7 +51,10 @@ def get_market_price(market_id: str) -> float | None:
     if not gamma_cb.can_execute():
         return None
     try:
-        r = requests.get(f"{GAMMA_BASE}/markets/{market_id}", timeout=(10, 15))
+        r = _gamma_session.get(
+            f"{GAMMA_BASE}/markets/{market_id}",
+            timeout=(settings.POLYMARKET_TIMEOUT, settings.POLYMARKET_TIMEOUT + 5),
+        )
         r.raise_for_status()
         data = r.json()
         gamma_cb.record_success()
@@ -64,7 +73,10 @@ def get_market_detail(market_id: str) -> dict | None:
     if not gamma_cb.can_execute():
         return None
     try:
-        r = requests.get(f"{GAMMA_BASE}/markets/{market_id}", timeout=(10, 15))
+        r = _gamma_session.get(
+            f"{GAMMA_BASE}/markets/{market_id}",
+            timeout=(settings.POLYMARKET_TIMEOUT, settings.POLYMARKET_TIMEOUT + 5),
+        )
         r.raise_for_status()
         gamma_cb.record_success()
         return r.json()

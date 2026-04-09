@@ -19,8 +19,9 @@ def _get_client():
     if _client is not None:
         return _client
 
-    if not settings.POLYMARKET_PRIVATE_KEY:
-        logger.error("[CLOB] No private key configured — cannot trade")
+    pk = str(settings.POLYMARKET_PRIVATE_KEY or "").strip()
+    if not pk or pk.lower().startswith("your-"):
+        logger.error("[CLOB] No valid private key configured — cannot trade")
         return None
 
     try:
@@ -28,7 +29,7 @@ def _get_client():
 
         _client = ClobClient(
             settings.POLYMARKET_HOST,
-            key=settings.POLYMARKET_PRIVATE_KEY,
+            key=pk,
             chain_id=settings.POLYMARKET_CHAIN_ID,
             signature_type=settings.POLYMARKET_SIGNATURE_TYPE,
             funder=settings.POLYMARKET_FUNDER or None,

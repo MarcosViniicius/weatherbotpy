@@ -196,7 +196,8 @@ def main():
         try:
             app.run_polling(
                 drop_pending_updates=True,
-                allowed_updates=["message"],
+                # Inline keyboard clicks arrive as callback_query updates.
+                allowed_updates=["message", "callback_query"],
             )
         except KeyboardInterrupt:
             logger.info("[MAIN] Keyboard interrupt received")

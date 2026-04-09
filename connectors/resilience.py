@@ -6,6 +6,9 @@ Used as decorators / wrappers on every external API call.
 import time
 import logging
 import functools
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from datetime import datetime, timezone
 
 logger = logging.getLogger("weatherbet.resilience")
@@ -138,3 +141,48 @@ gamma_cb = CircuitBreaker("gamma_api", failure_threshold=5, recovery_timeout=120
 openmeteo_cb = CircuitBreaker("open_meteo", failure_threshold=5, recovery_timeout=120)
 metar_cb = CircuitBreaker("metar", failure_threshold=5, recovery_timeout=180)
 clob_cb = CircuitBreaker("clob_api", failure_threshold=3, recovery_timeout=300)
+
+
+# ═══════════════════════════════════════════════════════════
+# SHARED HTTP SESSIONS (connection pooling + keep-alive)
+# ═══════════════════════════════════════════════════════════
+
+_sessions: dict[str, requests.Session] = {}
+
+
+def get_http_session(service: str = "default") -> requests.Session:
+    """
+    Return a shared requests.Session per service.
+    Reuses TCP connections and reduces handshake overhead.
+    """
+    sess = _sessions.get(service)
+    if sess is not None:
+        return sess
+
+    session = requests.Session()
+    retry = Retry(
+        total=1,
+        connect=1,
+        read=1,
+        backoff_factor=0.15,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("GET",),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(
+        pool_connections=32,
+        pool_maxsize=64,
+        max_retries=retry,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update(
+        {
+            "User-Agent": "weatherbet/3.0",
+            "Accept": "application/json,text/plain,*/*",
+            "Connection": "keep-alive",
+        }
+    )
+
+    _sessions[service] = session
+    return session

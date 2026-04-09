@@ -4,7 +4,7 @@ Registers all handlers and runs the polling loop.
 """
 
 import logging
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
 from config.settings import TELEGRAM_TOKEN
 from telegram_bot import handlers
@@ -27,11 +27,21 @@ def build_application() -> Application | None:
     # Register command handlers
     app.add_handler(CommandHandler("start",      handlers.cmd_start))
     app.add_handler(CommandHandler("help",       handlers.cmd_help))
+    app.add_handler(CommandHandler("menu",       handlers.cmd_menu))
+    app.add_handler(CommandHandler("hidemenu",   handlers.cmd_hidemenu))
     app.add_handler(CommandHandler("status",     handlers.cmd_status))
     app.add_handler(CommandHandler("positions",  handlers.cmd_positions))
     app.add_handler(CommandHandler("markets",    handlers.cmd_markets))
     app.add_handler(CommandHandler("orders",     handlers.cmd_orders))
+    app.add_handler(CommandHandler("startbot",   handlers.cmd_iniciar))
+    app.add_handler(CommandHandler("stopbot",    handlers.cmd_parar))
+    app.add_handler(CommandHandler("iniciar",    handlers.cmd_iniciar))
+    app.add_handler(CommandHandler("parar",      handlers.cmd_parar))
+    app.add_handler(CommandHandler("resume",     handlers.cmd_iniciar))
+    app.add_handler(CommandHandler("pause",      handlers.cmd_parar))
     app.add_handler(CommandHandler("scan",       handlers.cmd_scan))
+    app.add_handler(CommandHandler("risk",       handlers.cmd_risk))
+    app.add_handler(CommandHandler("setrisk",    handlers.cmd_setrisk))
     app.add_handler(CommandHandler("report",     handlers.cmd_report))
     app.add_handler(CommandHandler("daily",      handlers.cmd_daily))
     app.add_handler(CommandHandler("weekly",     handlers.cmd_weekly))
@@ -45,5 +55,11 @@ def build_application() -> Application | None:
     app.add_handler(CommandHandler("notifications", handlers.cmd_notifications))
     app.add_handler(CommandHandler("calibration", handlers.cmd_calibration))
 
-    logger.info("[BOT] Application built with %d handlers", 19)
+    # Inline menu callbacks (catch all; handler validates action prefix)
+    app.add_handler(CallbackQueryHandler(handlers.cmd_menu_callback))
+
+    # Legacy reply-keyboard text fallback
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.cmd_menu_text_fallback))
+
+    logger.info("[BOT] Application built with %d handlers", 29)
     return app

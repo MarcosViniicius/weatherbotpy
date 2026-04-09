@@ -7,10 +7,15 @@ import logging
 import requests
 from datetime import datetime, timezone, timedelta
 from config.locations import LOCATIONS, TIMEZONES
+from config import settings
 from config.settings import VC_KEY
-from connectors.resilience import retry_with_backoff, openmeteo_cb, metar_cb
+from connectors.resilience import retry_with_backoff, openmeteo_cb, metar_cb, get_http_session
 
 logger = logging.getLogger("weatherbet.forecasts")
+
+_weather_session = get_http_session("weather")
+_metar_session = get_http_session("metar")
+_vc_session = get_http_session("visual_crossing")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -38,7 +43,10 @@ def get_ecmwf(city_slug: str, dates: list[str]) -> dict[str, float]:
     )
 
     try:
-        response = requests.get(url, timeout=(5, 10))
+        response = _weather_session.get(
+            url,
+            timeout=(settings.WEATHER_TIMEOUT, settings.WEATHER_TIMEOUT + 5),
+        )
         if response.status_code != 200:
             openmeteo_cb.record_failure()
             return {}
@@ -88,7 +96,10 @@ def get_hrrr(city_slug: str, dates: list[str]) -> dict[str, float]:
     )
 
     try:
-        response = requests.get(url, timeout=(5, 10))
+        response = _weather_session.get(
+            url,
+            timeout=(settings.WEATHER_TIMEOUT, settings.WEATHER_TIMEOUT + 5),
+        )
         if response.status_code != 200:
             openmeteo_cb.record_failure()
             return {}
@@ -128,7 +139,10 @@ def get_metar(city_slug: str) -> float | None:
 
     try:
         url = f"https://aviationweather.gov/api/data/metar?ids={station}&format=json"
-        response = requests.get(url, timeout=(10, 15))
+        response = _metar_session.get(
+            url,
+            timeout=(settings.WEATHER_TIMEOUT, settings.WEATHER_TIMEOUT + 5),
+        )
         if response.status_code != 200:
             metar_cb.record_failure()
             return None
@@ -177,7 +191,10 @@ def get_actual_temp(city_slug: str, date_str: str) -> float | None:
     )
 
     try:
-        data = requests.get(url, timeout=(10, 15)).json()
+        data = _vc_session.get(
+            url,
+            timeout=(settings.WEATHER_TIMEOUT, settings.WEATHER_TIMEOUT + 5),
+        ).json()
         days = data.get("days", [])
         if days and days[0].get("tempmax") is not None:
             return round(float(days[0]["tempmax"]), 1)
