@@ -267,8 +267,8 @@ def is_running() -> bool:
 
 async def force_scan(notify_func) -> str:
     """Force an immediate full scan (called via /scan command)."""
+    global _scan_activity
     try:
-        global _scan_activity
         settings.reload_risk_config()
         set_notify(notify_func)
         loop = asyncio.get_event_loop()

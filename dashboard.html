@@ -570,7 +570,7 @@ function renderScanActivity(activity) {
       <div style="color:#2a5a2a">LAST SCAN</div>
       <div style="color:#88ff88;margin-top:3px">${lastScan}</div>
       <div style="margin-top:6px;color:#88ff88">New: ${activity.new || 0} | Closed: ${activity.closed || 0} | Resolved: ${activity.resolved || 0}</div>
-      <div style="margin-top:6px;color:#2a5a2a">Monitor closed: ${activity.last_monitor_closed || 0}</div>
+      <div style="margin-top:6px;color:#2a5a2a">Positions closed by monitor: ${activity.last_monitor_closed || 0}</div>
       <div style="margin-top:6px;color:${failures ? '#ffcc00' : '#2a5a2a'}">Failures: ${failures}${retry ? ` · next retry ${retry}s` : ''}</div>
       <div style="margin-top:6px;color:${err !== 'None' ? '#ff2244' : '#2a5a2a'};word-break:break-word;">Last error: ${err}</div>
     </div>
