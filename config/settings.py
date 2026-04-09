@@ -164,38 +164,38 @@ def _load_risk_toml() -> dict:
 _risk_cfg = _load_risk_toml()
 
 
-def _risk_float(toml_key: str, env_key: str, default: float) -> float:
+def _risk_float(toml_key: str, default: float) -> float:
     val = _risk_cfg.get(toml_key)
     if val is not None:
         try:
             return float(val)
         except (TypeError, ValueError):
             pass
-    return _env_float(env_key, default)
+    return default
 
 
-def _risk_int(toml_key: str, env_key: str, default: int) -> int:
+def _risk_int(toml_key: str, default: int) -> int:
     val = _risk_cfg.get(toml_key)
     if val is not None:
         try:
             return int(val)
         except (TypeError, ValueError):
             pass
-    return _env_int(env_key, default)
+    return default
 
 
-BALANCE = _risk_float("balance", "BALANCE", 20.0)
-MAX_BET = _risk_float("max_bet", "MAX_BET", 2.0)
+BALANCE = _risk_float("balance", 20.0)
+MAX_BET = _risk_float("max_bet", 2.0)
 MIN_EV = _env_float("MIN_EV", 0.08)
-MIN_EDGE = _risk_float("min_edge", "MIN_EDGE", 0.08)  # Minimum edge (p - price) to enter
-MAX_PRICE = _risk_float("max_price", "MAX_PRICE", 0.60)
-MIN_VOLUME = _risk_int("min_volume", "MIN_VOLUME", 200)
-MIN_HOURS = _risk_float("min_hours", "MIN_HOURS", 2.0)
-MAX_HOURS = _risk_float("max_hours", "MAX_HOURS", 72.0)
-KELLY_FRACTION = _risk_float("kelly_fraction", "KELLY_FRACTION", 0.25)
-MAX_SLIPPAGE = _risk_float("max_slippage", "MAX_SLIPPAGE", 0.02)
-SCAN_INTERVAL = _risk_int("scan_interval", "SCAN_INTERVAL", 900)
-CALIBRATION_MIN = _risk_int("calibration_min", "CALIBRATION_MIN", 50)
+MIN_EDGE = _risk_float("min_edge", 0.08)  # Minimum edge (p - price) to enter
+MAX_PRICE = _risk_float("max_price", 0.60)
+MIN_VOLUME = _risk_int("min_volume", 200)
+MIN_HOURS = _risk_float("min_hours", 2.0)
+MAX_HOURS = _risk_float("max_hours", 72.0)
+KELLY_FRACTION = _risk_float("kelly_fraction", 0.25)
+MAX_SLIPPAGE = _risk_float("max_slippage", 0.02)
+SCAN_INTERVAL = _risk_int("scan_interval", 900)
+CALIBRATION_MIN = _risk_int("calibration_min", 50)
 
 # ── Derived Constants ────────────────────────────────────
 SIGMA_F = 2.0  # Default forecast sigma for Fahrenheit cities

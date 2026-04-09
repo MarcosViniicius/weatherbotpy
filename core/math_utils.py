@@ -10,7 +10,7 @@ v3.1 — Improved:
 """
 
 import math
-from config.settings import KELLY_FRACTION, MAX_BET
+from config import settings
 
 
 def norm_cdf(x: float) -> float:
@@ -109,13 +109,13 @@ def calc_kelly(p: float, price: float) -> float:
         return 0.0
     # Full Kelly for binary outcome: (p - price) / (1 - price)
     f = (p - price) / (1.0 - price)
-    return round(min(max(0.0, f) * KELLY_FRACTION, 1.0), 4)
+    return round(min(max(0.0, f) * settings.KELLY_FRACTION, 1.0), 4)
 
 
 def bet_size(kelly: float, balance: float) -> float:
     """Dollar amount to bet, capped by MAX_BET."""
     raw = kelly * balance
-    return round(min(raw, MAX_BET), 2)
+    return round(min(raw, settings.MAX_BET), 2)
 
 
 def in_bucket(forecast: float, t_low: float, t_high: float) -> bool:

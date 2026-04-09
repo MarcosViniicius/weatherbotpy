@@ -7,9 +7,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from config.settings import (
-    STATE_FILE, MARKETS_DIR, BALANCE,
-)
+from config import settings
 from config.locations import LOCATIONS
 
 logger = logging.getLogger("weatherbet.state")
@@ -20,23 +18,23 @@ logger = logging.getLogger("weatherbet.state")
 # ═══════════════════════════════════════════════════════════
 
 def load_state() -> dict:
-    if STATE_FILE.exists():
+    if settings.STATE_FILE.exists():
         try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            return json.loads(settings.STATE_FILE.read_text(encoding="utf-8"))
         except Exception as e:
             logger.error("[STATE] Corrupt state file: %s", e)
     return {
-        "balance":          BALANCE,
-        "starting_balance": BALANCE,
+        "balance":          settings.BALANCE,
+        "starting_balance": settings.BALANCE,
         "total_trades":     0,
         "wins":             0,
         "losses":           0,
-        "peak_balance":     BALANCE,
+        "peak_balance":     settings.BALANCE,
     }
 
 
 def save_state(state: dict):
-    STATE_FILE.write_text(
+    settings.STATE_FILE.write_text(
         json.dumps(state, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -47,7 +45,7 @@ def save_state(state: dict):
 # ═══════════════════════════════════════════════════════════
 
 def market_path(city_slug: str, date_str: str) -> Path:
-    return MARKETS_DIR / f"{city_slug}_{date_str}.json"
+    return settings.MARKETS_DIR / f"{city_slug}_{date_str}.json"
 
 
 def load_market(city_slug: str, date_str: str) -> dict | None:
@@ -70,7 +68,7 @@ def save_market(market: dict):
 
 def load_all_markets() -> list[dict]:
     markets = []
-    for f in MARKETS_DIR.glob("*.json"):
+    for f in settings.MARKETS_DIR.glob("*.json"):
         try:
             markets.append(json.loads(f.read_text(encoding="utf-8")))
         except Exception:
@@ -108,7 +106,7 @@ def clear_simulation_data():
     """Clear all simulation data: markets, state, and predictions log."""
     try:
         # Delete all market cache files
-        for f in MARKETS_DIR.glob("*.json"):
+        for f in settings.MARKETS_DIR.glob("*.json"):
             try:
                 f.unlink()
                 logger.info("[CLEAR] Deleted market file: %s", f.name)
@@ -117,18 +115,18 @@ def clear_simulation_data():
         
         # Reset state to initial values
         initial_state = {
-            "balance":          BALANCE,
-            "starting_balance": BALANCE,
+            "balance":          settings.BALANCE,
+            "starting_balance": settings.BALANCE,
             "total_trades":     0,
             "wins":             0,
             "losses":           0,
-            "peak_balance":     BALANCE,
+            "peak_balance":     settings.BALANCE,
         }
         save_state(initial_state)
         logger.info("[CLEAR] State reset to initial values")
         
         # Clear predictions log
-        pred_log = STATE_FILE.parent / "predictions_log.json"
+        pred_log = settings.STATE_FILE.parent / "predictions_log.json"
         if pred_log.exists():
             pred_log.write_text("[]", encoding="utf-8")
             logger.info("[CLEAR] Predictions log cleared")

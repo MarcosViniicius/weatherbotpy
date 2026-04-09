@@ -12,7 +12,7 @@ import json
 import math
 import logging
 from datetime import datetime, timezone
-from config.settings import CALIBRATION_FILE, DATA_DIR, CALIBRATION_MIN, SIGMA_F, SIGMA_C
+from config import settings
 from config.locations import LOCATIONS
 
 logger = logging.getLogger("weatherbet.calibration")
@@ -20,14 +20,14 @@ logger = logging.getLogger("weatherbet.calibration")
 _cal: dict = {}
 
 # File to track predictions for calibration curve
-PREDICTIONS_FILE = DATA_DIR / "predictions_log.json"
+PREDICTIONS_FILE = settings.DATA_DIR / "predictions_log.json"
 
 
 def load_cal() -> dict:
     global _cal
-    if CALIBRATION_FILE.exists():
+    if settings.CALIBRATION_FILE.exists():
         try:
-            _cal = json.loads(CALIBRATION_FILE.read_text(encoding="utf-8"))
+            _cal = json.loads(settings.CALIBRATION_FILE.read_text(encoding="utf-8"))
         except Exception:
             _cal = {}
     else:
@@ -40,7 +40,7 @@ def get_sigma(city_slug: str, source: str = "ecmwf") -> float:
     key = f"{city_slug}_{source}"
     if key in _cal:
         return _cal[key]["sigma"]
-    return SIGMA_F if LOCATIONS[city_slug]["unit"] == "F" else SIGMA_C
+    return settings.SIGMA_F if LOCATIONS[city_slug]["unit"] == "F" else settings.SIGMA_C
 
 
 def log_prediction(city: str, date: str, p: float, edge: float, price: float,
@@ -170,13 +170,13 @@ def run_calibration(markets: list[dict]) -> dict:
                 )
                 if snap and snap.get("best") is not None and m.get("actual_temp") is not None:
                     errors.append(abs(snap["best"] - m["actual_temp"]))
-            if len(errors) < CALIBRATION_MIN:
+            if len(errors) < settings.CALIBRATION_MIN:
                 continue
             mae = sum(errors) / len(errors)
             key = f"{city}_{source}"
             old = cal.get(key, {}).get(
                 "sigma",
-                SIGMA_F if LOCATIONS.get(city, {}).get("unit") == "F" else SIGMA_C,
+                settings.SIGMA_F if LOCATIONS.get(city, {}).get("unit") == "F" else settings.SIGMA_C,
             )
             new = round(mae, 3)
             cal[key] = {
@@ -188,7 +188,7 @@ def run_calibration(markets: list[dict]) -> dict:
                 city_name = LOCATIONS.get(city, {}).get("name", city)
                 updated.append(f"{city_name} {source}: {old:.2f}->{new:.2f}")
 
-    CALIBRATION_FILE.write_text(json.dumps(cal, indent=2), encoding="utf-8")
+    settings.CALIBRATION_FILE.write_text(json.dumps(cal, indent=2), encoding="utf-8")
     if updated:
         logger.info("[CAL] %s", ", ".join(updated))
     return cal
