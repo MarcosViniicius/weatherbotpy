@@ -12,6 +12,9 @@ v3.1 — Improved:
 import math
 from config import settings
 
+BASELINE_SLIPPAGE_POINTS = 0.0025
+SPREAD_SLIPPAGE_FACTOR = 0.25
+
 
 def norm_cdf(x: float) -> float:
     """Standard normal cumulative distribution function."""
@@ -86,15 +89,14 @@ def estimate_slippage(spread: float, max_slippage: float = 0.02) -> float:
     """
     Estimate effective slippage as a function of spread/liquidity quality.
     Keeps value bounded by configured max_slippage.
-    Formula: slippage = min(max_slippage, 0.0025 + 0.25 * spread).
+    Formula: slippage = min(max_slippage, BASELINE_SLIPPAGE_POINTS + SPREAD_SLIPPAGE_FACTOR * spread).
     This adds a small baseline execution cost and scales with wider spreads.
     """
     spread = max(0.0, float(spread))
     cap = max(0.0, float(max_slippage))
     if cap == 0:
         return 0.0
-    # Base 0.25% + 25% of spread, capped for safety.
-    return round(min(cap, 0.0025 + (spread * 0.25)), 4)
+    return round(min(cap, BASELINE_SLIPPAGE_POINTS + (spread * SPREAD_SLIPPAGE_FACTOR)), 4)
 
 
 def calc_edge_after_costs(p: float, entry_price: float, spread: float, slippage_points: float = 0.005) -> float:

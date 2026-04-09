@@ -31,7 +31,13 @@ logger = logging.getLogger("weatherbet.strategy")
 # Adjacent buckets are allowed but receive an 8% confidence haircut to keep
 # the primary forecast bucket prioritized while still recovering near-boundary opportunities.
 ADJACENT_BUCKET_CONFIDENCE_PENALTY = 0.92
-EPSILON_DIVISOR = 0.0001
+MIN_PRICE_DIVISOR = 0.0001
+MIN_RESOLVED_FOR_KELLY_BOOST = 8
+MIN_PERF_RATIO_FOR_KELLY_BOOST = 0.05
+MIN_WIN_RATE_FOR_KELLY_BOOST = 0.58
+MAX_SCALE_IN_ENTRIES = 2
+SCALE_IN_POSITION_FRACTION = 0.35
+SCALE_IN_BALANCE_FRACTION = 0.15
 
 # Will be set by the scheduler to push Telegram notifications
 _notify_func = None
@@ -183,7 +189,11 @@ def _calculate_adaptive_kelly_fraction(state: dict) -> float:
         mult = 0.55
     elif drawdown >= 0.10:
         mult = 0.75
-    elif resolved >= 8 and perf_ratio > 0.05 and win_rate >= 0.58:
+    elif (
+        resolved >= MIN_RESOLVED_FOR_KELLY_BOOST
+        and perf_ratio > MIN_PERF_RATIO_FOR_KELLY_BOOST
+        and win_rate >= MIN_WIN_RATE_FOR_KELLY_BOOST
+    ):
         mult = 1.10
 
     return round(max(0.01, min(0.35, base * mult)), 4)
@@ -198,7 +208,7 @@ def _calculate_edge_size_multiplier(edge_adjusted: float) -> float:
 
 
 def _relative_spread(spread: float, ask: float) -> float:
-    return max(0.0, float(spread)) / max(float(ask), EPSILON_DIVISOR)
+    return max(0.0, float(spread)) / max(float(ask), MIN_PRICE_DIVISOR)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -856,14 +866,18 @@ def monitor_positions() -> int:
             not edge_decay_close
             and 6 <= hours_left <= 24
             and current_exec_edge >= (entry_exec_edge + settings.SCALE_IN_EDGE_STEP)
-            and int(pos.get("entries_count") or 1) < 2
+            and int(pos.get("entries_count") or 1) < MAX_SCALE_IN_ENTRIES
         ):
             max_position_cost = min(
                 max(0.0, settings.MAX_BET * settings.MAX_POSITION_MULTIPLIER),
                 max(0.0, float(pos.get("cost", 0.0)) + balance),
             )
             remaining_cap = max(0.0, max_position_cost - float(pos.get("cost", 0.0)))
-            scale_cost = min(remaining_cap, max(0.0, float(pos.get("cost", 0.0)) * 0.35), max(0.0, balance * 0.15))
+            scale_cost = min(
+                remaining_cap,
+                max(0.0, float(pos.get("cost", 0.0)) * SCALE_IN_POSITION_FRACTION),
+                max(0.0, balance * SCALE_IN_BALANCE_FRACTION),
+            )
             scale_cost = round(scale_cost, 2)
             scale_shares = round(scale_cost / current_ask, 2) if current_ask > 0 else 0.0
             if scale_cost >= 0.50 and scale_shares > 0:
