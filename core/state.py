@@ -104,9 +104,9 @@ def load_state() -> dict:
     if settings.STATE_FILE.exists():
         try:
             state = json.loads(settings.STATE_FILE.read_text(encoding="utf-8"))
-            state, wallet_changed = _sync_state_balance_from_wallet(state)
+            state, wallet_sync_changed = _sync_state_balance_from_wallet(state)
             state, changed = _sync_state_balance_if_idle(state)
-            if changed or wallet_changed:
+            if changed or wallet_sync_changed:
                 save_state(state)
             return state
         except Exception as e:

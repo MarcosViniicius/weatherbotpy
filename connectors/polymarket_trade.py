@@ -59,7 +59,7 @@ def _extract_numeric_balance(payload, depth: int = 0) -> float | None:
     if isinstance(payload, dict):
         for key in (
             "balance", "available", "total", "amount", "usdc", "usdc_balance",
-            "collateral", "value", "asset_balance", "numericBalance",
+            "collateral", "value", "asset_balance", "numericBalance", "numeric_balance",
         ):
             if key in payload:
                 parsed = _extract_numeric_balance(payload.get(key), depth + 1)
