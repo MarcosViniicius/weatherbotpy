@@ -27,6 +27,8 @@ from core.state import (
 )
 
 logger = logging.getLogger("weatherbet.strategy")
+# Adjacent buckets are allowed but receive an 8% confidence haircut to keep
+# the primary forecast bucket prioritized while still recovering near-boundary opportunities.
 ADJACENT_BUCKET_CONFIDENCE_PENALTY = 0.92
 
 # Will be set by the scheduler to push Telegram notifications
@@ -371,22 +373,22 @@ def scan_and_update() -> tuple[int, int, int]:
                 best_signal = None
 
                 # Find the bucket matching our forecast
-                matched_index = None
+                primary_bucket_index = None
                 for idx, o in enumerate(outcomes):
                     t_low, t_high = o["range"]
                     if in_bucket(forecast_temp, t_low, t_high):
-                        matched_index = idx
+                        primary_bucket_index = idx
                         break
 
-                if matched_index is not None:
-                    candidate_indices = [matched_index]
+                if primary_bucket_index is not None:
+                    candidate_indices = [primary_bucket_index]
                     adjacent_indices = []
-                    if matched_index > 0:
-                        adjacent_indices.append(matched_index - 1)
-                    if matched_index < len(outcomes) - 1:
-                        adjacent_indices.append(matched_index + 1)
+                    if primary_bucket_index > 0:
+                        adjacent_indices.append(primary_bucket_index - 1)
+                    if primary_bucket_index < len(outcomes) - 1:
+                        adjacent_indices.append(primary_bucket_index + 1)
                     adjacent_indices.sort(
-                        key=lambda i2: abs(((outcomes[i2]["range"][0] + outcomes[i2]["range"][1]) / 2.0) - forecast_temp)
+                        key=lambda bucket_idx: abs(((outcomes[bucket_idx]["range"][0] + outcomes[bucket_idx]["range"][1]) / 2.0) - forecast_temp)
                     )
                     candidate_indices.extend(adjacent_indices)
 
@@ -419,7 +421,7 @@ def scan_and_update() -> tuple[int, int, int]:
 
                         # Raw probability from model
                         p_raw = bucket_prob(forecast_temp, t_low, t_high, sigma)
-                        is_adjacent = idx != matched_index
+                        is_adjacent = idx != primary_bucket_index
                         conf_adj = conf * (ADJACENT_BUCKET_CONFIDENCE_PENALTY if is_adjacent else 1.0)
                         p = max(0.0, min(1.0, p_raw * conf_adj))
 
