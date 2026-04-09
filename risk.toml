@@ -13,3 +13,4 @@ kelly_fraction = 0.25
 max_slippage = 0.02
 scan_interval = 900
 calibration_min = 50
+relax_stage = 1

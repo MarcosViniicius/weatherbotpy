@@ -129,26 +129,26 @@ def confidence_by_time(hours: float) -> float:
     """
     Confidence multiplier based on hours until event resolution.
     REDUCED from previous to avoid overconfidence bias.
-    Returns value between 0.50 and 0.80:
-      < 6h  → 0.80 (realistic high)
-      6-12h → 0.75
-      12-24h → 0.70
-      24-48h → 0.60
-      48-72h → 0.55
-      > 72h  → 0.50
+    Returns value between 0.65 and 0.85:
+      < 6h   → 0.85
+      6-12h  → 0.82
+      12-24h → 0.78
+      24-48h → 0.72
+      48-72h → 0.68
+      > 72h  → 0.65
     """
     if hours <= 6:
-        return 0.80
+        return 0.85
     elif hours <= 12:
-        return 0.75
+        return 0.82
     elif hours <= 24:
-        return 0.70
+        return 0.78
     elif hours <= 48:
-        return 0.60
+        return 0.72
     elif hours <= 72:
-        return 0.55
+        return 0.68
     else:
-        return 0.50
+        return 0.65
 
 
 def forecast_disagreement_sigma(forecasts: list[float], base_sigma: float) -> float:

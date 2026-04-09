@@ -8,12 +8,62 @@ import json
 import logging
 import requests
 from config import settings
+from config.locations import LOCATIONS
 from connectors.resilience import retry_with_backoff, gamma_cb, get_http_session
 
 logger = logging.getLogger("weatherbet.polymarket_read")
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 _gamma_session = get_http_session("gamma")
+
+
+def _slugify(value: str) -> str:
+    value = (value or "").strip().lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    return re.sub(r"-{2,}", "-", value).strip("-")
+
+
+def _event_slug_candidates(city_slug: str, month: str, day: int, year: int) -> list[str]:
+    city_name = LOCATIONS.get(city_slug, {}).get("name", city_slug)
+    city_variants = {_slugify(city_slug), _slugify(city_name)}
+    day_variants = {str(day), f"{day:02d}"}
+    candidates: list[str] = []
+    templates = [
+        "highest-temperature-in-{city}-on-{month}-{day}-{year}",
+        "what-will-be-the-highest-temperature-in-{city}-on-{month}-{day}-{year}",
+        "temperature-in-{city}-on-{month}-{day}-{year}",
+    ]
+    for city in city_variants:
+        if not city:
+            continue
+        for d in day_variants:
+            for tpl in templates:
+                slug = tpl.format(city=city, month=month, day=d, year=year)
+                if slug not in candidates:
+                    candidates.append(slug)
+    return candidates
+
+
+def _event_matches_city_and_date(event: dict, city_slug: str, month: str, day: int, year: int) -> bool:
+    city_name = _slugify(LOCATIONS.get(city_slug, {}).get("name", city_slug))
+    slug = _slugify(str(event.get("slug", "")))
+    title = _slugify(str(event.get("title", "")))
+    end_date = str(event.get("endDate", ""))
+    date_token = f"-{month}-{day}-{year}"
+    date_token_padded = f"-{month}-{day:02d}-{year}"
+
+    has_city = (
+        _slugify(city_slug) in slug
+        or _slugify(city_slug) in title
+        or city_name in slug
+        or city_name in title
+    )
+    has_date = (
+        date_token in slug
+        or date_token_padded in slug
+        or end_date.startswith(f"{year:04d}-")
+    )
+    return has_city and has_date
 
 
 # ═══════════════════════════════════════════════════════════
@@ -27,19 +77,56 @@ def get_event(city_slug: str, month: str, day: int, year: int) -> dict | None:
         logger.warning("[GAMMA] Circuit open — skipping get_event")
         return None
 
-    slug = f"highest-temperature-in-{city_slug}-on-{month}-{day}-{year}"
+    date_label = f"{year:04d}-{month}-{day:02d}"
+    candidates = _event_slug_candidates(city_slug, month, day, year)
+    for slug in candidates:
+        try:
+            r = _gamma_session.get(
+                f"{GAMMA_BASE}/events",
+                params={"slug": slug},
+                timeout=(settings.POLYMARKET_TIMEOUT, settings.POLYMARKET_TIMEOUT + 5),
+            )
+            r.raise_for_status()
+            data = r.json()
+            gamma_cb.record_success()
+            if data and isinstance(data, list):
+                for event in data:
+                    if _event_matches_city_and_date(event, city_slug, month, day, year):
+                        return event
+        except requests.RequestException as e:
+            logger.debug("[GAMMA] Slug lookup failed slug=%s city=%s date=%s error=%s", slug, city_slug, date_label, e)
+            gamma_cb.record_failure()
+            raise
+
+    # Fallback query in case slug format changed upstream.
     try:
         r = _gamma_session.get(
             f"{GAMMA_BASE}/events",
-            params={"slug": slug},
+            params={"active": "true", "limit": 250},
             timeout=(settings.POLYMARKET_TIMEOUT, settings.POLYMARKET_TIMEOUT + 5),
         )
         r.raise_for_status()
         data = r.json()
         gamma_cb.record_success()
-        if data and isinstance(data, list) and len(data) > 0:
-            return data[0]
-    except requests.RequestException as e:
+        if isinstance(data, list):
+            sample_slugs = [str(e.get("slug")) for e in data[:5]]
+            for event in data:
+                if _event_matches_city_and_date(event, city_slug, month, day, year):
+                    logger.info(
+                        "[GAMMA] Event resolved via fallback city=%s date=%s slug=%s",
+                        city_slug, date_label, event.get("slug"),
+                    )
+                    return event
+            logger.warning(
+                "[GAMMA] Event not found city=%s date=%s tried_slugs=%s fallback_count=%d sample_slugs=%s",
+                city_slug, date_label, candidates[:5], len(data), sample_slugs,
+            )
+        else:
+            logger.warning(
+                "[GAMMA] Event lookup returned non-list payload city=%s date=%s payload_type=%s",
+                city_slug, date_label, type(data).__name__,
+            )
+    except requests.RequestException:
         gamma_cb.record_failure()
         raise
     return None

@@ -17,7 +17,7 @@ from config.locations import LOCATIONS
 from connectors import polymarket_read as pm_read
 from connectors import polymarket_trade as pm_trade
 from core.math_utils import (
-    bucket_prob, calc_edge, calc_kelly, bet_size, in_bucket,
+    bucket_prob, calc_edge, calc_ev_after_costs, calc_kelly, bet_size, in_bucket,
     confidence_by_time, forecast_disagreement_sigma, late_market_multiplier,
 )
 from core.calibration import get_sigma, run_calibration, load_cal, log_prediction, record_outcome
@@ -27,6 +27,9 @@ from core.state import (
 )
 
 logger = logging.getLogger("weatherbet.strategy")
+# Adjacent buckets are allowed but receive an 8% confidence haircut to keep
+# the primary forecast bucket prioritized while still recovering near-boundary opportunities.
+ADJACENT_BUCKET_CONFIDENCE_PENALTY = 0.92
 
 # Will be set by the scheduler to push Telegram notifications
 _notify_func = None
@@ -58,6 +61,103 @@ def _is_production() -> bool:
     return get_mode() == "production"
 
 
+def _rollout_thresholds() -> dict:
+    """
+    Effective risk thresholds by rollout stage:
+      0=baseline, 1=A(min_volume), 2=B(slippage/spread), 3=C(max_price), 4=D(min_edge)
+    """
+    stage = max(0, min(int(settings.RELAX_STAGE), 4))
+    cfg = {
+        "stage": stage,
+        "min_volume": int(settings.MIN_VOLUME),
+        "max_slippage": float(settings.MAX_SLIPPAGE),
+        "max_price": float(settings.MAX_PRICE),
+        "min_edge": float(settings.MIN_EDGE),
+        "max_relative_spread": 0.15,
+    }
+    if stage >= 1:
+        cfg["min_volume"] = min(cfg["min_volume"], 150)
+    if stage >= 2:
+        cfg["max_slippage"] = max(cfg["max_slippage"], 0.03)
+        cfg["max_relative_spread"] = max(cfg["max_relative_spread"], 0.20)
+    if stage >= 3:
+        cfg["max_price"] = max(cfg["max_price"], 0.65)
+    if stage >= 4:
+        cfg["min_edge"] = min(cfg["min_edge"], 0.04)
+    return cfg
+
+
+def _new_cycle_stats(thresholds: dict) -> dict:
+    return {
+        "rollout_stage": thresholds["stage"],
+        "expected_events": 0,
+        "events_found": 0,
+        "markets_read": 0,
+        "markets_valid": 0,
+        "signals_generated": 0,
+        "net_ev_sum": 0.0,
+        "real_spread_sum": 0.0,
+        "signals_by_city": {},
+        "discard_reasons": {
+            "event_not_found": 0,
+            "hours": 0,
+            "spread_relative": 0,
+            "volume": 0,
+            "ev": 0,
+            "price": 0,
+            "slippage": 0,
+        },
+    }
+
+
+def _log_cycle_metrics(stats: dict):
+    signals = int(stats["signals_generated"])
+    avg_ev = round(stats["net_ev_sum"] / signals, 4) if signals else 0.0
+    avg_spread = round(stats["real_spread_sum"] / signals, 4) if signals else 0.0
+    concentration = 0.0
+    top_city = None
+    if signals and stats["signals_by_city"]:
+        top_city = max(stats["signals_by_city"], key=stats["signals_by_city"].get)
+        concentration = stats["signals_by_city"][top_city] / signals
+    discards_json = json.dumps(stats["discard_reasons"], sort_keys=True)
+
+    logger.info(
+        "[SCAN_METRICS] stage=%s events=%s/%s markets=%s valid=%s signals=%s avg_net_ev=%+.4f avg_spread=%.4f discards=%s",
+        stats["rollout_stage"],
+        stats["events_found"],
+        stats["expected_events"],
+        stats["markets_read"],
+        stats["markets_valid"],
+        signals,
+        avg_ev,
+        avg_spread,
+        discards_json,
+    )
+    if top_city:
+        logger.info("[SCAN_METRICS] signal_concentration top_city=%s ratio=%.2f", top_city, concentration)
+    if signals and avg_ev < 0:
+        logger.warning("[ROLLBACK_GUARD] Negative average net EV detected in this cycle: %+.4f", avg_ev)
+    if signals and avg_spread > settings.MAX_SLIPPAGE:
+        logger.warning(
+            "[ROLLBACK_GUARD] Average spread above configured max_slippage: spread=%.4f max=%.4f",
+            avg_spread,
+            settings.MAX_SLIPPAGE,
+        )
+    if concentration > 0.7:
+        logger.warning(
+            "[ROLLBACK_GUARD] Signal concentration high on %s: %.0f%%",
+            top_city,
+            concentration * 100,
+        )
+
+
+def _set_signal_ev_fields(signal: dict, ev_value: float) -> None:
+    """Keep legacy EV keys synchronized while transitioning to net_ev naming."""
+    signal["net_ev"] = ev_value
+    signal["ev_after_costs"] = ev_value
+    signal["ev"] = ev_value
+
+
 # ═══════════════════════════════════════════════════════════
 # FULL SCAN
 # ═══════════════════════════════════════════════════════════
@@ -77,6 +177,8 @@ def scan_and_update() -> tuple[int, int, int]:
     closed = 0
     resolved_count = 0
     production = _is_production()
+    thresholds = _rollout_thresholds()
+    cycle_stats = _new_cycle_stats(thresholds)
 
     for city_slug, loc in LOCATIONS.items():
         unit = loc["unit"]
@@ -91,6 +193,7 @@ def scan_and_update() -> tuple[int, int, int]:
             continue
 
         for i, date in enumerate(dates):
+            cycle_stats["expected_events"] += 1
             dt = datetime.strptime(date, "%Y-%m-%d")
             event = pm_read.get_event(
                 city_slug,
@@ -99,7 +202,10 @@ def scan_and_update() -> tuple[int, int, int]:
                 dt.year,
             )
             if not event:
+                cycle_stats["discard_reasons"]["event_not_found"] += 1
+                logger.info("[DISCARD] reason=event_not_found city=%s date=%s", city_slug, date)
                 continue
+            cycle_stats["events_found"] += 1
 
             end_date = event.get("endDate", "")
             hours = pm_read.hours_to_resolution(end_date) if end_date else 0
@@ -109,6 +215,8 @@ def scan_and_update() -> tuple[int, int, int]:
             mkt = load_market(city_slug, date)
             if mkt is None:
                 if hours < settings.MIN_HOURS or hours > settings.MAX_HOURS:
+                    cycle_stats["discard_reasons"]["hours"] += 1
+                    logger.info("[DISCARD] reason=hours city=%s date=%s hours=%.1f range=[%.1f,%.1f]", city_slug, date, hours, settings.MIN_HOURS, settings.MAX_HOURS)
                     continue
                 mkt = new_market(city_slug, date, event, hours)
 
@@ -118,6 +226,7 @@ def scan_and_update() -> tuple[int, int, int]:
             # ── Parse all outcomes ───────────────────────
             outcomes = []
             for market in event.get("markets", []):
+                cycle_stats["markets_read"] += 1
                 question = market.get("question", "")
                 mid = str(market.get("id", ""))
                 volume = float(market.get("volume", 0))
@@ -146,6 +255,7 @@ def scan_and_update() -> tuple[int, int, int]:
                     "spread":    round(ask - bid, 4),
                     "volume":    round(volume, 0),
                 })
+                cycle_stats["markets_valid"] += 1
 
             outcomes.sort(key=lambda x: x["range"][0])
             mkt["all_outcomes"] = outcomes
@@ -263,82 +373,106 @@ def scan_and_update() -> tuple[int, int, int]:
                 best_signal = None
 
                 # Find the bucket matching our forecast
-                matched_bucket = None
-                for o in outcomes:
+                primary_bucket_index = None
+                for idx, o in enumerate(outcomes):
                     t_low, t_high = o["range"]
                     if in_bucket(forecast_temp, t_low, t_high):
-                        matched_bucket = o
+                        primary_bucket_index = idx
                         break
 
-                if matched_bucket:
-                    o = matched_bucket
-                    t_low, t_high = o["range"]
-                    volume = o["volume"]
-                    bid = o.get("bid", o["price"])
-                    ask = o.get("ask", o["price"])
-                    spread = o.get("spread", 0)
-                    price_mid = o.get("price", (bid + ask) / 2.0)
+                if primary_bucket_index is not None:
+                    candidate_indices = [primary_bucket_index]
+                    adjacent_indices = []
+                    if primary_bucket_index > 0:
+                        adjacent_indices.append(primary_bucket_index - 1)
+                    if primary_bucket_index < len(outcomes) - 1:
+                        adjacent_indices.append(primary_bucket_index + 1)
+                    adjacent_indices.sort(
+                        key=lambda bucket_idx: abs(((outcomes[bucket_idx]["range"][0] + outcomes[bucket_idx]["range"][1]) / 2.0) - forecast_temp)
+                    )
+                    candidate_indices.extend(adjacent_indices)
 
-                    # Filter by REAL liquidity: relative spread must be acceptable
-                    if price_mid > 0:
+                    for idx in candidate_indices:
+                        o = outcomes[idx]
+                        t_low, t_high = o["range"]
+                        volume = o["volume"]
+                        bid = o.get("bid", o["price"])
+                        ask = o.get("ask", o["price"])
+                        spread = o.get("spread", 0.0)
+                        price_mid = o.get("price", (bid + ask) / 2.0)
+
+                        if price_mid <= 0:
+                            cycle_stats["discard_reasons"]["price"] += 1
+                            logger.info("[DISCARD] reason=price city=%s date=%s market=%s detail=invalid_mid", city_slug, date, o["market_id"])
+                            continue
                         spread_ratio = spread / price_mid
-                        if spread_ratio > 0.15:  # >15% relative spread = skip
+                        if spread_ratio > thresholds["max_relative_spread"]:
+                            cycle_stats["discard_reasons"]["spread_relative"] += 1
+                            logger.info("[DISCARD] reason=spread_relative city=%s date=%s market=%s spread_ratio=%.4f max=%.4f", city_slug, date, o["market_id"], spread_ratio, thresholds["max_relative_spread"])
+                            continue
+                        if volume < thresholds["min_volume"]:
+                            cycle_stats["discard_reasons"]["volume"] += 1
+                            logger.info("[DISCARD] reason=volume city=%s date=%s market=%s volume=%.0f min=%d", city_slug, date, o["market_id"], volume, thresholds["min_volume"])
+                            continue
+                        if ask >= thresholds["max_price"]:
+                            cycle_stats["discard_reasons"]["price"] += 1
+                            logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f max=%.4f", city_slug, date, o["market_id"], ask, thresholds["max_price"])
                             continue
 
-                    if volume >= settings.MIN_VOLUME:
                         # Raw probability from model
                         p_raw = bucket_prob(forecast_temp, t_low, t_high, sigma)
-                        # Adjusted probability with time confidence
-                        p = p_raw * conf
+                        is_adjacent = idx != primary_bucket_index
+                        conf_adj = conf * (ADJACENT_BUCKET_CONFIDENCE_PENALTY if is_adjacent else 1.0)
+                        p = max(0.0, min(1.0, p_raw * conf_adj))
 
-                        # Edge = p - price (correct for binary markets)
                         edge = calc_edge(p, ask)
-                        # EV after execution costs (for binary contracts this is
-                        # equivalent to net edge after costs)
-                        from core.math_utils import calc_ev_after_costs
                         ev_after_costs = calc_ev_after_costs(p, ask, spread)
+                        if ev_after_costs < thresholds["min_edge"]:
+                            cycle_stats["discard_reasons"]["ev"] += 1
+                            logger.info("[DISCARD] reason=ev city=%s date=%s market=%s net_ev=%+.4f min=%+.4f", city_slug, date, o["market_id"], ev_after_costs, thresholds["min_edge"])
+                            continue
 
-                        # Filter: require minimum net EV after spread/slippage
-                        if ev_after_costs >= settings.MIN_EDGE:
-                            kelly = calc_kelly(p, ask)
+                        kelly = calc_kelly(p, ask)
+                        lm_mult = late_market_multiplier(hours)
+                        kelly_adjusted = min(kelly * lm_mult, 0.25)
+                        size = bet_size(kelly_adjusted, balance)
+                        if size < 0.50:
+                            continue
 
-                            # Late market aggressiveness: boost Kelly 6-18h before event
-                            lm_mult = late_market_multiplier(hours)
-                            kelly_adjusted = min(kelly * lm_mult, 0.25)
-
-                            size = bet_size(kelly_adjusted, balance)
-                            if size >= 0.50:
-                                best_signal = {
-                                    "market_id":     o["market_id"],
-                                    "question":      o["question"],
-                                    "bucket_low":    t_low,
-                                    "bucket_high":   t_high,
-                                    "entry_price":   ask,
-                                    "bid_at_entry":  bid,
-                                    "spread":        spread,
-                                    "shares":        round(size / ask, 2),
-                                    "cost":          size,
-                                    "p":             round(p, 4),
-                                    "p_raw":         round(p_raw, 4),
-                                    "confidence":    round(conf, 2),
-                                    "edge":          round(edge, 4),
-                                    "net_ev":        round(ev_after_costs, 4),
-                                    "kelly":         round(kelly_adjusted, 4),
-                                "kelly_raw":     round(kelly, 4),
-                                "lm_mult":       lm_mult,
-                                "forecast_temp": forecast_temp,
-                                "forecast_src":  best_source,
-                                "sigma":         round(sigma, 2),
-                                "sigma_base":    round(base_sigma, 2),
-                                "hours_left":    round(hours, 1),
-                                "opened_at":     snap.get("ts"),
-                                "status":        "open",
-                                "pnl":           None,
-                                "exit_price":    None,
-                                "close_reason":  None,
-                                "closed_at":     None,
-                                "forecast_at_entry": forecast_temp,
-                            }
+                        best_signal = {
+                            "market_id":     o["market_id"],
+                            "question":      o["question"],
+                            "bucket_low":    t_low,
+                            "bucket_high":   t_high,
+                            "entry_price":   ask,
+                            "bid_at_entry":  bid,
+                            "spread":        spread,
+                            "shares":        round(size / ask, 2),
+                            "cost":          size,
+                            "p":             round(p, 4),
+                            "p_raw":         round(p_raw, 4),
+                            "confidence":    round(conf_adj, 2),
+                            "adjusted_confidence": round(conf_adj, 2),
+                            "edge":          round(edge, 4),
+                            "kelly":         round(kelly_adjusted, 4),
+                            "kelly_raw":     round(kelly, 4),
+                            "lm_mult":       lm_mult,
+                            "bucket_priority": "adjacent" if is_adjacent else "primary",
+                            "forecast_temp": forecast_temp,
+                            "forecast_src":  best_source,
+                            "sigma":         round(sigma, 2),
+                            "sigma_base":    round(base_sigma, 2),
+                            "hours_left":    round(hours, 1),
+                            "opened_at":     snap.get("ts"),
+                            "status":        "open",
+                            "pnl":           None,
+                            "exit_price":    None,
+                            "close_reason":  None,
+                            "closed_at":     None,
+                            "forecast_at_entry": forecast_temp,
+                        }
+                        _set_signal_ev_fields(best_signal, round(ev_after_costs, 4))
+                        break
 
                 if best_signal:
                     # Fetch real ask from Polymarket for accurate entry
@@ -349,20 +483,27 @@ def scan_and_update() -> tuple[int, int, int]:
                             real_ask = float(mdata.get("bestAsk", best_signal["entry_price"]))
                             real_bid = float(mdata.get("bestBid", best_signal["bid_at_entry"]))
                             real_spread = round(real_ask - real_bid, 4)
-                            if real_spread > settings.MAX_SLIPPAGE or real_ask >= settings.MAX_PRICE:
+                            if real_ask >= thresholds["max_price"]:
+                                cycle_stats["discard_reasons"]["price"] += 1
+                                logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f max=%.4f", city_slug, date, best_signal["market_id"], real_ask, thresholds["max_price"])
+                                skip = True
+                            elif real_spread > thresholds["max_slippage"]:
+                                cycle_stats["discard_reasons"]["slippage"] += 1
+                                logger.info("[DISCARD] reason=slippage city=%s date=%s market=%s spread=%.4f max=%.4f", city_slug, date, best_signal["market_id"], real_spread, thresholds["max_slippage"])
                                 skip = True
                             else:
                                 best_signal["entry_price"] = real_ask
                                 best_signal["bid_at_entry"] = real_bid
                                 best_signal["spread"] = real_spread
                                 best_signal["shares"] = round(best_signal["cost"] / real_ask, 2)
-                                # Recalculate with real price
+                                # Recalculate with real execution data (keep legacy `ev` key for compatibility)
                                 best_signal["edge"] = round(calc_edge(best_signal["p"], real_ask), 4)
-                                best_signal["ev"] = round(calc_ev(best_signal["p"], real_ask), 4)
+                                real_ev = round(calc_ev_after_costs(best_signal["p"], real_ask, real_spread), 4)
+                                _set_signal_ev_fields(best_signal, real_ev)
                     except Exception as e:
                         logger.warning("[SCAN] Could not fetch real ask: %s", e)
 
-                    if not skip and best_signal["entry_price"] < settings.MAX_PRICE:
+                    if not skip:
                         # ── Execute trade ────────────────
                         if production:
                             try:
@@ -402,12 +543,16 @@ def scan_and_update() -> tuple[int, int, int]:
                             mkt["position"] = best_signal
                             state["total_trades"] += 1
                             new_pos += 1
+                            cycle_stats["signals_generated"] += 1
+                            cycle_stats["net_ev_sum"] += best_signal.get("net_ev", 0.0)
+                            cycle_stats["real_spread_sum"] += best_signal.get("spread", 0.0)
+                            cycle_stats["signals_by_city"][city_slug] = cycle_stats["signals_by_city"].get(city_slug, 0) + 1
                             bucket_label = f"{best_signal['bucket_low']}-{best_signal['bucket_high']}{unit_sym}"
                             mode_tag = "🔴 PROD" if production else "🟡 SIM"
                             msg = (
                                 f"📈 [{mode_tag}] BUY {loc['name']} {horizon} {date}\n"
                                 f"   {bucket_label} @ ${best_signal['entry_price']:.3f}\n"
-                                f"   Edge {best_signal['edge']:+.2%} | EV {best_signal['ev']:+.4f} | ${best_signal['cost']:.2f}\n"
+                                f"   Edge {best_signal['edge']:+.2%} | Net EV {best_signal['net_ev']:+.4f} | ${best_signal['cost']:.2f}\n"
                                 f"   σ={best_signal['sigma']:.1f} | conf={best_signal['confidence']:.0%} | {best_signal['forecast_src'].upper()}"
                             )
                             _notify(msg)
@@ -421,7 +566,7 @@ def scan_and_update() -> tuple[int, int, int]:
                                 sigma=best_signal["sigma"],
                                 confidence=best_signal["confidence"],
                                 spread=best_signal.get("spread", 0.0),
-                                ev_after_costs=best_signal.get("ev_after_costs", 0.0),
+                                ev_after_costs=best_signal.get("net_ev", 0.0),
                             )
 
             # Market closed by time
@@ -487,6 +632,7 @@ def scan_and_update() -> tuple[int, int, int]:
     if resolved_total >= settings.CALIBRATION_MIN:
         run_calibration(all_mkts)
 
+    _log_cycle_metrics(cycle_stats)
     return new_pos, closed, resolved_count
 
 

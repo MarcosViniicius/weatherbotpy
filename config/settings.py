@@ -100,6 +100,7 @@ _DEFAULT_RISK_CONFIG = {
     "max_slippage": 0.02,
     "scan_interval": 900,
     "calibration_min": 50,
+    "relax_stage": 0,
 }
 
 _RISK_TYPE = {
@@ -114,6 +115,7 @@ _RISK_TYPE = {
     "max_slippage": float,
     "scan_interval": int,
     "calibration_min": int,
+    "relax_stage": int,
 }
 
 
@@ -139,6 +141,7 @@ def _write_risk_toml(risk: dict) -> None:
         "",
         "[execution]",
         f"scan_interval = {int(risk.get('scan_interval', _DEFAULT_RISK_CONFIG['scan_interval']))}",
+        f"relax_stage = {int(risk.get('relax_stage', _DEFAULT_RISK_CONFIG['relax_stage']))}",
         "",
         "[model]",
         f"calibration_min = {int(risk.get('calibration_min', _DEFAULT_RISK_CONFIG['calibration_min']))}",
@@ -180,7 +183,7 @@ def _load_risk_toml() -> dict:
             "account": ["balance", "max_bet"],
             "risk": ["min_edge", "max_price", "kelly_fraction"],
             "market_filters": ["min_volume", "min_hours", "max_hours", "max_slippage"],
-            "execution": ["scan_interval"],
+            "execution": ["scan_interval", "relax_stage"],
             "model": ["calibration_min"],
         }
         for section_name, keys in section_key_map.items():
@@ -225,6 +228,7 @@ _RISK_GLOBAL_MAPPING = {
     "max_slippage": "MAX_SLIPPAGE",
     "scan_interval": "SCAN_INTERVAL",
     "calibration_min": "CALIBRATION_MIN",
+    "relax_stage": "RELAX_STAGE",
 }
 
 
@@ -259,6 +263,7 @@ KELLY_FRACTION = _risk_float("kelly_fraction", 0.25)
 MAX_SLIPPAGE = _risk_float("max_slippage", 0.02)
 SCAN_INTERVAL = _risk_int("scan_interval", 900)
 CALIBRATION_MIN = _risk_int("calibration_min", 50)
+RELAX_STAGE = _risk_int("relax_stage", 0)
 
 # ── Derived Constants ────────────────────────────────────
 SIGMA_F = 2.0  # Default forecast sigma for Fahrenheit cities
@@ -351,6 +356,7 @@ def get_risk_config() -> dict:
         "max_slippage": MAX_SLIPPAGE,
         "scan_interval": SCAN_INTERVAL,
         "calibration_min": CALIBRATION_MIN,
+        "relax_stage": RELAX_STAGE,
     }
 
 
