@@ -197,6 +197,10 @@ body::after{content:'';position:fixed;inset:0;background-image:linear-gradient(r
     <div class="card-head"><span class="card-title">Edge Reality Check</span><span class="card-badge" id="edge-badge">LIVE</span></div>
     <div class="scroll" id="edge-log"><div class="empty">Analyzing spreads...</div></div>
   </div>
+  <div class="panel">
+    <div class="card-head"><span class="card-title">Scan Activity</span><span class="card-badge" id="scan-badge">IDLE</span></div>
+    <div class="scroll" id="scan-log"><div class="empty">Waiting for first scan...</div></div>
+  </div>
 </div>
 
 <div class="footer">
@@ -533,6 +537,46 @@ function renderCalibration(cal) {
   el.innerHTML = html;
 }
 
+function renderScanActivity(activity) {
+  const el = document.getElementById('scan-log');
+  const badge = document.getElementById('scan-badge');
+  if (!el || !badge) return;
+
+  if (!activity || (!activity.last_scan_at && !activity.last_error)) {
+    badge.textContent = 'IDLE';
+    el.innerHTML = '<div class="empty">Scanning in background... waiting for first cycle</div>';
+    return;
+  }
+
+  const status = (activity.last_status || 'idle').toUpperCase();
+  badge.textContent = status;
+  if (status === 'ERROR') {
+    badge.style.color = '#ff2244';
+    badge.style.borderColor = 'rgba(255,34,68,.25)';
+    badge.style.background = 'rgba(255,34,68,.08)';
+  } else {
+    badge.style.color = '#00ff41';
+    badge.style.borderColor = 'rgba(0,255,65,.2)';
+    badge.style.background = 'rgba(0,255,65,.08)';
+  }
+
+  const lastScan = activity.last_scan_at ? new Date(activity.last_scan_at).toLocaleString() : '—';
+  const failures = activity.consecutive_failures || 0;
+  const retry = activity.next_retry_in_sec || 0;
+  const err = activity.last_error || 'None';
+
+  el.innerHTML = `
+    <div style="padding:10px 14px;border-bottom:1px solid #0a2a0a;font-size:10px;">
+      <div style="color:#2a5a2a">LAST SCAN</div>
+      <div style="color:#88ff88;margin-top:3px">${lastScan}</div>
+      <div style="margin-top:6px;color:#88ff88">New: ${activity.new || 0} | Closed: ${activity.closed || 0} | Resolved: ${activity.resolved || 0}</div>
+      <div style="margin-top:6px;color:#2a5a2a">Monitor closed: ${activity.last_monitor_closed || 0}</div>
+      <div style="margin-top:6px;color:${failures ? '#ffcc00' : '#2a5a2a'}">Failures: ${failures}${retry ? ` · next retry ${retry}s` : ''}</div>
+      <div style="margin-top:6px;color:${err !== 'None' ? '#ff2244' : '#2a5a2a'};word-break:break-word;">Last error: ${err}</div>
+    </div>
+  `;
+}
+
 async function loadData() {
   try {
     const r = await fetch('/api/data?t=' + Date.now(), {
@@ -561,6 +605,7 @@ async function loadData() {
     const positions = d.positions || {};
     const trades = d.trades || [];
     const cal = d.calibration || {};
+    const scanActivity = d.scan_activity || {};
     const peak = d.peak_balance || bal;
     const mode = d.mode || 'simulation';
 
@@ -616,11 +661,13 @@ async function loadData() {
     renderEvLog(trades);
     renderEdgeReality(positions);
     renderCalibration(cal);
+    renderScanActivity(scanActivity);
 
   } catch (e) {
     document.getElementById('status-dot').className = 'dot gray';
     document.getElementById('status-text').textContent = 'OFFLINE';
     document.getElementById('ts').textContent = 'Bot not running';
+    renderScanActivity(null);
   }
 }
 
