@@ -95,26 +95,26 @@ def estimate_slippage(spread: float, max_slippage: float = 0.02) -> float:
     return round(min(cap, 0.0025 + (spread * 0.25)), 4)
 
 
-def calc_edge_after_costs(p: float, entry_price: float, spread: float, slippage_frac: float = 0.005) -> float:
+def calc_edge_after_costs(p: float, entry_price: float, spread: float, slippage_points: float = 0.005) -> float:
     """Execution-adjusted edge: p - (price + slippage + spread/2)."""
     if entry_price <= 0 or entry_price >= 1:
         return 0.0
-    effective_price = min(entry_price + max(0.0, slippage_frac) + max(0.0, spread) / 2.0, 0.99)
+    effective_price = min(entry_price + max(0.0, slippage_points) + max(0.0, spread) / 2.0, 0.99)
     return round(p - effective_price, 4)
 
 
-def calc_ev_after_costs(p: float, entry_price: float, spread: float, slippage_frac: float = 0.005) -> float:
+def calc_ev_after_costs(p: float, entry_price: float, spread: float, slippage_points: float = 0.005) -> float:
     """
     TRUE expected value after real execution costs.
     entry_price: actual ask we pay
     spread: bid-ask spread observed (absolute price points, e.g. 0.02)
-    slippage_frac: additional slippage in absolute price points (default 0.005)
+    slippage_points: additional slippage in absolute price points (default 0.005)
     
     Real cost: (spread/2 + slippage)
     """
     if entry_price <= 0 or entry_price >= 1:
         return 0.0
-    cost = (max(0.0, spread) / 2.0) + max(0.0, slippage_frac)
+    cost = (max(0.0, spread) / 2.0) + max(0.0, slippage_points)
     effective_price = min(entry_price + cost, 0.99)
     return round(p * (1.0 - effective_price) - (1.0 - p) * effective_price, 4)
 

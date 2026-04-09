@@ -469,10 +469,10 @@ def scan_and_update() -> tuple[int, int, int]:
                             logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f min=%.4f", city_slug, date, o["market_id"], ask, thresholds["min_price"])
                             continue
 
-                        spread_to_ask_ratio = spread / max(ask, 0.0001)
-                        if spread_to_ask_ratio > thresholds["max_relative_spread"]:
+                        relative_spread = spread / max(ask, 0.0001)
+                        if relative_spread > thresholds["max_relative_spread"]:
                             cycle_stats["discard_reasons"]["spread_relative"] += 1
-                            logger.info("[DISCARD] reason=spread_relative city=%s date=%s market=%s spread_ratio=%.4f max=%.4f", city_slug, date, o["market_id"], spread_to_ask_ratio, thresholds["max_relative_spread"])
+                            logger.info("[DISCARD] reason=spread_relative city=%s date=%s market=%s spread_ratio=%.4f max=%.4f", city_slug, date, o["market_id"], relative_spread, thresholds["max_relative_spread"])
                             continue
                         if volume < thresholds["min_volume"]:
                             cycle_stats["discard_reasons"]["volume"] += 1
@@ -568,15 +568,15 @@ def scan_and_update() -> tuple[int, int, int]:
                             real_ask = float(mdata.get("bestAsk", best_signal["entry_price"]))
                             real_bid = float(mdata.get("bestBid", best_signal["bid_at_entry"]))
                             real_spread = round(max(0.0, real_ask - real_bid), 4)
-                            real_spread_ratio = real_spread / max(real_ask, 0.0001)
+                            real_relative_spread = real_spread / max(real_ask, 0.0001)
                             real_slippage = estimate_slippage(real_spread, thresholds["max_slippage"])
                             if real_ask < thresholds["min_price"] or real_ask >= thresholds["max_price"]:
                                 cycle_stats["discard_reasons"]["price"] += 1
                                 logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f range=[%.4f,%.4f)", city_slug, date, best_signal["market_id"], real_ask, thresholds["min_price"], thresholds["max_price"])
                                 skip = True
-                            elif real_spread > thresholds["max_slippage"] or real_spread_ratio > thresholds["max_relative_spread"]:
+                            elif real_spread > thresholds["max_slippage"] or real_relative_spread > thresholds["max_relative_spread"]:
                                 cycle_stats["discard_reasons"]["slippage"] += 1
-                                logger.info("[DISCARD] reason=slippage city=%s date=%s market=%s spread=%.4f ratio=%.4f max=[%.4f,%.4f]", city_slug, date, best_signal["market_id"], real_spread, real_spread_ratio, thresholds["max_slippage"], thresholds["max_relative_spread"])
+                                logger.info("[DISCARD] reason=slippage city=%s date=%s market=%s spread=%.4f ratio=%.4f max=[%.4f,%.4f]", city_slug, date, best_signal["market_id"], real_spread, real_relative_spread, thresholds["max_slippage"], thresholds["max_relative_spread"])
                                 skip = True
                             else:
                                 best_signal["entry_price"] = real_ask
