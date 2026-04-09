@@ -5,7 +5,7 @@ Designed to live alongside the Telegram bot in the same asyncio event loop.
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from copy import deepcopy
 
 from config import settings
@@ -186,7 +186,7 @@ async def _scan_loop(notify_func):
                 next_scan_allowed_at = 0.0
                 last_full_scan = asyncio.get_event_loop().time()
                 _scan_activity.update({
-                    "last_scan_at": datetime.now().isoformat(),
+                    "last_scan_at": datetime.now(timezone.utc).isoformat(),
                     "last_status": "ok",
                     "new": int(new_pos),
                     "closed": int(closed),
@@ -276,7 +276,7 @@ async def force_scan(notify_func) -> str:
         from core.state import load_state
         state = load_state()
         _scan_activity.update({
-            "last_scan_at": datetime.now().isoformat(),
+            "last_scan_at": datetime.now(timezone.utc).isoformat(),
             "last_status": "ok",
             "new": int(new_pos),
             "closed": int(closed),
