@@ -52,7 +52,12 @@ def _event_matches_city_and_date(event: dict, city_slug: str, month: str, day: i
     date_token = f"-{month}-{day}-{year}"
     date_token_padded = f"-{month}-{day:02d}-{year}"
 
-    has_city = _slugify(city_slug) in slug or city_name in slug or city_name in title
+    has_city = (
+        _slugify(city_slug) in slug
+        or _slugify(city_slug) in title
+        or city_name in slug
+        or city_name in title
+    )
     has_date = (
         date_token in slug
         or date_token_padded in slug

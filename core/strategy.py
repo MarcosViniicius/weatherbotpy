@@ -27,6 +27,7 @@ from core.state import (
 )
 
 logger = logging.getLogger("weatherbet.strategy")
+ADJACENT_BUCKET_CONFIDENCE_PENALTY = 0.92
 
 # Will be set by the scheduler to push Telegram notifications
 _notify_func = None
@@ -145,6 +146,13 @@ def _log_cycle_metrics(stats: dict):
             top_city,
             concentration * 100,
         )
+
+
+def _set_signal_ev_fields(signal: dict, ev_value: float) -> None:
+    """Keep legacy EV keys synchronized while transitioning to net_ev naming."""
+    signal["net_ev"] = ev_value
+    signal["ev_after_costs"] = ev_value
+    signal["ev"] = ev_value
 
 
 # ═══════════════════════════════════════════════════════════
@@ -371,10 +379,15 @@ def scan_and_update() -> tuple[int, int, int]:
 
                 if matched_index is not None:
                     candidate_indices = [matched_index]
+                    adjacent_indices = []
                     if matched_index > 0:
-                        candidate_indices.append(matched_index - 1)
+                        adjacent_indices.append(matched_index - 1)
                     if matched_index < len(outcomes) - 1:
-                        candidate_indices.append(matched_index + 1)
+                        adjacent_indices.append(matched_index + 1)
+                    adjacent_indices.sort(
+                        key=lambda i2: abs(((outcomes[i2]["range"][0] + outcomes[i2]["range"][1]) / 2.0) - forecast_temp)
+                    )
+                    candidate_indices.extend(adjacent_indices)
 
                     for idx in candidate_indices:
                         o = outcomes[idx]
@@ -406,7 +419,7 @@ def scan_and_update() -> tuple[int, int, int]:
                         # Raw probability from model
                         p_raw = bucket_prob(forecast_temp, t_low, t_high, sigma)
                         is_adjacent = idx != matched_index
-                        conf_adj = conf * (0.92 if is_adjacent else 1.0)
+                        conf_adj = conf * (ADJACENT_BUCKET_CONFIDENCE_PENALTY if is_adjacent else 1.0)
                         p = max(0.0, min(1.0, p_raw * conf_adj))
 
                         edge = calc_edge(p, ask)
@@ -437,9 +450,6 @@ def scan_and_update() -> tuple[int, int, int]:
                             "p_raw":         round(p_raw, 4),
                             "confidence":    round(conf_adj, 2),
                             "edge":          round(edge, 4),
-                            "net_ev":        round(ev_after_costs, 4),
-                            "ev_after_costs": round(ev_after_costs, 4),
-                            "ev":            round(ev_after_costs, 4),
                             "kelly":         round(kelly_adjusted, 4),
                             "kelly_raw":     round(kelly, 4),
                             "lm_mult":       lm_mult,
@@ -457,6 +467,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             "closed_at":     None,
                             "forecast_at_entry": forecast_temp,
                         }
+                        _set_signal_ev_fields(best_signal, round(ev_after_costs, 4))
                         break
 
                 if best_signal:
@@ -484,9 +495,7 @@ def scan_and_update() -> tuple[int, int, int]:
                                 # Recalculate with real execution data (keep legacy `ev` key for compatibility)
                                 best_signal["edge"] = round(calc_edge(best_signal["p"], real_ask), 4)
                                 real_ev = round(calc_ev_after_costs(best_signal["p"], real_ask, real_spread), 4)
-                                best_signal["ev"] = real_ev
-                                best_signal["net_ev"] = real_ev
-                                best_signal["ev_after_costs"] = real_ev
+                                _set_signal_ev_fields(best_signal, real_ev)
                     except Exception as e:
                         logger.warning("[SCAN] Could not fetch real ask: %s", e)
 
@@ -539,7 +548,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             msg = (
                                 f"📈 [{mode_tag}] BUY {loc['name']} {horizon} {date}\n"
                                 f"   {bucket_label} @ ${best_signal['entry_price']:.3f}\n"
-                                f"   Edge {best_signal['edge']:+.2%} | EV {best_signal.get('net_ev', best_signal.get('ev', 0.0)):+.4f} | ${best_signal['cost']:.2f}\n"
+                                f"   Edge {best_signal['edge']:+.2%} | EV {best_signal['net_ev']:+.4f} | ${best_signal['cost']:.2f}\n"
                                 f"   σ={best_signal['sigma']:.1f} | conf={best_signal['confidence']:.0%} | {best_signal['forecast_src'].upper()}"
                             )
                             _notify(msg)
