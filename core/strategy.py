@@ -323,6 +323,8 @@ def scan_and_update() -> tuple[int, int, int]:
                                     "confidence":    round(conf, 2),
                                     "edge":          round(edge, 4),
                                     "net_ev":        round(ev_after_costs, 4),
+                                    "ev_after_costs": round(ev_after_costs, 4),
+                                    "ev":            round(ev_after_costs, 4),
                                     "kelly":         round(kelly_adjusted, 4),
                                 "kelly_raw":     round(kelly, 4),
                                 "lm_mult":       lm_mult,
@@ -358,7 +360,10 @@ def scan_and_update() -> tuple[int, int, int]:
                                 best_signal["shares"] = round(best_signal["cost"] / real_ask, 2)
                                 # Recalculate with real price
                                 best_signal["edge"] = round(calc_edge(best_signal["p"], real_ask), 4)
-                                best_signal["ev"] = round(calc_ev(best_signal["p"], real_ask), 4)
+                                real_ev = round(calc_ev(best_signal["p"], real_ask), 4)
+                                best_signal["ev"] = real_ev
+                                best_signal["net_ev"] = real_ev
+                                best_signal["ev_after_costs"] = real_ev
                     except Exception as e:
                         logger.warning("[SCAN] Could not fetch real ask: %s", e)
 
@@ -407,7 +412,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             msg = (
                                 f"📈 [{mode_tag}] BUY {loc['name']} {horizon} {date}\n"
                                 f"   {bucket_label} @ ${best_signal['entry_price']:.3f}\n"
-                                f"   Edge {best_signal['edge']:+.2%} | EV {best_signal['ev']:+.4f} | ${best_signal['cost']:.2f}\n"
+                                f"   Edge {best_signal['edge']:+.2%} | EV {best_signal.get('net_ev', best_signal.get('ev', 0.0)):+.4f} | ${best_signal['cost']:.2f}\n"
                                 f"   σ={best_signal['sigma']:.1f} | conf={best_signal['confidence']:.0%} | {best_signal['forecast_src'].upper()}"
                             )
                             _notify(msg)
@@ -421,7 +426,7 @@ def scan_and_update() -> tuple[int, int, int]:
                                 sigma=best_signal["sigma"],
                                 confidence=best_signal["confidence"],
                                 spread=best_signal.get("spread", 0.0),
-                                ev_after_costs=best_signal.get("ev_after_costs", 0.0),
+                                ev_after_costs=best_signal.get("net_ev", best_signal.get("ev_after_costs", 0.0)),
                             )
 
             # Market closed by time
