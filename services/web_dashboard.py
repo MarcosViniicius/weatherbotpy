@@ -65,6 +65,7 @@ def _build_api_data() -> dict:
     from core.state import load_state, load_all_markets
     from connectors.polymarket_read import hours_to_resolution
     from services.mode_manager import get_mode
+    from services.scheduler import get_scan_activity
     from core.calibration import compute_calibration_report
 
     state = load_state()
@@ -179,6 +180,7 @@ def _build_api_data() -> dict:
         "trades": trades,
         "calibration": compute_calibration_report(),
         "mode": mode,
+        "scan_activity": get_scan_activity(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 

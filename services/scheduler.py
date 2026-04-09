@@ -5,7 +5,8 @@ Designed to live alongside the Telegram bot in the same asyncio event loop.
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+from copy import deepcopy
 
 from config import settings
 from core.strategy import scan_and_update, monitor_positions, set_notify
@@ -19,6 +20,17 @@ _notify_interval = 600  # 10 min default
 _last_notify_time = ""  # ISO timestamp of last notification
 BASE_SCAN_BACKOFF_SECONDS = 60
 MAX_SCAN_BACKOFF_SECONDS = 900
+_scan_activity = {
+    "last_scan_at": "",
+    "last_status": "idle",
+    "new": 0,
+    "closed": 0,
+    "resolved": 0,
+    "last_error": "",
+    "consecutive_failures": 0,
+    "next_retry_in_sec": 0,
+    "last_monitor_closed": 0,
+}
 
 
 def set_notifications(enabled: bool, interval: int = 600):
@@ -30,6 +42,11 @@ def set_notifications(enabled: bool, interval: int = 600):
 
 def get_notifications_status() -> tuple[bool, int]:
     return _notifications_enabled, _notify_interval
+
+
+def get_scan_activity() -> dict:
+    """Expose recent scheduler scan activity for dashboard/API."""
+    return deepcopy(_scan_activity)
 
 
 async def _send_positions_update(notify_func):
@@ -129,7 +146,7 @@ async def _send_positions_update(notify_func):
 
 async def _scan_loop(notify_func):
     """Main scan loop: full scan every SCAN_INTERVAL, monitor every MONITOR_INTERVAL."""
-    global _running, _last_notify_time
+    global _running, _last_notify_time, _scan_activity
     _running = True
     set_notify(notify_func)
 
@@ -168,6 +185,16 @@ async def _scan_loop(notify_func):
                 consecutive_scan_failures = 0
                 next_scan_allowed_at = 0.0
                 last_full_scan = asyncio.get_event_loop().time()
+                _scan_activity.update({
+                    "last_scan_at": datetime.now(timezone.utc).isoformat(),
+                    "last_status": "ok",
+                    "new": int(new_pos),
+                    "closed": int(closed),
+                    "resolved": int(resolved),
+                    "last_error": "",
+                    "consecutive_failures": 0,
+                    "next_retry_in_sec": 0,
+                })
 
             except Exception as e:
                 consecutive_scan_failures += 1
@@ -182,6 +209,12 @@ async def _scan_loop(notify_func):
                     f"🚨 Scan error: {e}\n"
                     f"Failure #{consecutive_scan_failures} — retrying in {int(backoff)}s."
                 )
+                _scan_activity.update({
+                    "last_status": "error",
+                    "last_error": str(e),
+                    "consecutive_failures": int(consecutive_scan_failures),
+                    "next_retry_in_sec": int(backoff),
+                })
                 continue
         else:
             # Quick position monitor
@@ -189,6 +222,7 @@ async def _scan_loop(notify_func):
             try:
                 loop = asyncio.get_event_loop()
                 stopped = await loop.run_in_executor(None, monitor_positions)
+                _scan_activity["last_monitor_closed"] = int(stopped)
                 if stopped:
                     from core.state import load_state
                     state = load_state()
@@ -233,6 +267,7 @@ def is_running() -> bool:
 
 async def force_scan(notify_func) -> str:
     """Force an immediate full scan (called via /scan command)."""
+    global _scan_activity
     try:
         settings.reload_risk_config()
         set_notify(notify_func)
@@ -240,10 +275,24 @@ async def force_scan(notify_func) -> str:
         new_pos, closed, resolved = await loop.run_in_executor(None, scan_and_update)
         from core.state import load_state
         state = load_state()
+        _scan_activity.update({
+            "last_scan_at": datetime.now(timezone.utc).isoformat(),
+            "last_status": "ok",
+            "new": int(new_pos),
+            "closed": int(closed),
+            "resolved": int(resolved),
+            "last_error": "",
+            "consecutive_failures": 0,
+            "next_retry_in_sec": 0,
+        })
         return (
             f"📊 Manual scan complete\n"
             f"Balance: ${state['balance']:,.2f}\n"
             f"New: {new_pos} | Closed: {closed} | Resolved: {resolved}"
         )
     except Exception as e:
+        _scan_activity.update({
+            "last_status": "error",
+            "last_error": str(e),
+        })
         return f"🚨 Scan failed: {e}"
