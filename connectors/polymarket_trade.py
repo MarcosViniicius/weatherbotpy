@@ -78,6 +78,21 @@ def _extract_numeric_balance(payload, depth: int = 0) -> float | None:
     return None
 
 
+def _has_required_positional_params(method) -> bool:
+    """Return True if method requires positional args without defaults."""
+    try:
+        sig = inspect.signature(method)
+    except Exception:
+        return False
+    for p in sig.parameters.values():
+        if (
+            p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            and p.default is inspect.Parameter.empty
+        ):
+            return True
+    return False
+
+
 @retry_with_backoff(max_retries=2, base_delay=1.0)
 def get_wallet_balance() -> float | None:
     """
@@ -99,17 +114,8 @@ def get_wallet_balance() -> float | None:
         calls.append(("get_balance", client.get_balance))
 
     for name, method in calls:
-        try:
-            sig = inspect.signature(method)
-            required = [
-                p for p in sig.parameters.values()
-                if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-                and p.default is inspect.Parameter.empty
-            ]
-            if required:
-                continue
-        except Exception:
-            pass
+        if _has_required_positional_params(method):
+            continue
         try:
             payload = method()
             value = _extract_numeric_balance(payload)

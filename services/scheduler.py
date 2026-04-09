@@ -171,8 +171,9 @@ async def _scan_loop(notify_func):
 
             except Exception as e:
                 consecutive_scan_failures += 1
+                exponent = min(max(0, consecutive_scan_failures - 1), 10)
                 backoff = min(
-                    BASE_SCAN_BACKOFF_SECONDS * (2 ** max(0, consecutive_scan_failures - 1)),
+                    BASE_SCAN_BACKOFF_SECONDS * (2 ** exponent),
                     MAX_SCAN_BACKOFF_SECONDS,
                 )
                 next_scan_allowed_at = asyncio.get_event_loop().time() + backoff
