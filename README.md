@@ -85,12 +85,17 @@ Chaves:
 - `balance`
 - `max_bet`
 - `min_edge`
+- `min_price`
 - `max_price`
 - `min_volume`
+- `max_relative_spread`
 - `min_hours`
 - `max_hours`
 - `kelly_fraction`
 - `max_slippage`
+- `edge_decay_exit_delta`
+- `scale_in_edge_step`
+- `max_position_multiplier`
 - `scan_interval`
 - `calibration_min`
 

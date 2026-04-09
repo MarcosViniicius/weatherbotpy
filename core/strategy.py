@@ -19,6 +19,7 @@ from connectors import polymarket_trade as pm_trade
 from core.math_utils import (
     bucket_prob, calc_edge, calc_ev_after_costs, calc_kelly, bet_size, in_bucket,
     confidence_by_time, forecast_disagreement_sigma, late_market_multiplier,
+    calc_edge_after_costs, estimate_slippage, edge_time_factor, disagreement_size_multiplier,
 )
 from core.calibration import get_sigma, run_calibration, load_cal, log_prediction, record_outcome
 from core.state import (
@@ -30,6 +31,13 @@ logger = logging.getLogger("weatherbet.strategy")
 # Adjacent buckets are allowed but receive an 8% confidence haircut to keep
 # the primary forecast bucket prioritized while still recovering near-boundary opportunities.
 ADJACENT_BUCKET_CONFIDENCE_PENALTY = 0.92
+MIN_PRICE_DIVISOR = 0.0001
+MIN_RESOLVED_FOR_KELLY_BOOST = 8
+MIN_PERF_RATIO_FOR_KELLY_BOOST = 0.05
+MIN_WIN_RATE_FOR_KELLY_BOOST = 0.58
+MAX_SCALE_IN_ENTRIES = 2
+SCALE_IN_POSITION_FRACTION = 0.35
+SCALE_IN_BALANCE_FRACTION = 0.15
 
 # Will be set by the scheduler to push Telegram notifications
 _notify_func = None
@@ -72,8 +80,9 @@ def _rollout_thresholds() -> dict:
         "min_volume": int(settings.MIN_VOLUME),
         "max_slippage": float(settings.MAX_SLIPPAGE),
         "max_price": float(settings.MAX_PRICE),
+        "min_price": float(settings.MIN_PRICE),
         "min_edge": float(settings.MIN_EDGE),
-        "max_relative_spread": 0.15,
+        "max_relative_spread": float(settings.MAX_RELATIVE_SPREAD),
     }
     if stage >= 1:
         cfg["min_volume"] = min(cfg["min_volume"], 150)
@@ -156,6 +165,50 @@ def _set_signal_ev_fields(signal: dict, ev_value: float) -> None:
     signal["net_ev"] = ev_value
     signal["ev_after_costs"] = ev_value
     signal["ev"] = ev_value
+
+
+def _calculate_adaptive_kelly_fraction(state: dict) -> float:
+    """
+    Adjust Kelly fraction by drawdown/performance to control risk:
+    - deeper drawdown => reduce Kelly
+    - sustained positive performance => mild increase
+    """
+    base = max(0.0, float(settings.KELLY_FRACTION))
+    balance = max(0.0, float(state.get("balance", 0.0)))
+    peak = max(balance, float(state.get("peak_balance", balance) or balance))
+    start = max(0.01, float(state.get("starting_balance", balance) or balance))
+    drawdown = (peak - balance) / peak if peak > 0 else 0.0
+    wins = int(state.get("wins", 0) or 0)
+    losses = int(state.get("losses", 0) or 0)
+    resolved = wins + losses
+    perf_ratio = (balance - start) / start
+    win_rate = (wins / resolved) if resolved else 0.0
+
+    mult = 1.0
+    if drawdown >= 0.20:
+        mult = 0.55
+    elif drawdown >= 0.10:
+        mult = 0.75
+    elif (
+        resolved >= MIN_RESOLVED_FOR_KELLY_BOOST
+        and perf_ratio > MIN_PERF_RATIO_FOR_KELLY_BOOST
+        and win_rate >= MIN_WIN_RATE_FOR_KELLY_BOOST
+    ):
+        mult = 1.10
+
+    return round(max(0.01, min(0.35, base * mult)), 4)
+
+
+def _calculate_edge_size_multiplier(edge_adjusted: float) -> float:
+    if edge_adjusted >= 0.08:
+        return 1.20
+    if edge_adjusted >= 0.06:
+        return 1.10
+    return 1.00
+
+
+def _relative_spread(spread: float, ask: float) -> float:
+    return max(0.0, float(spread)) / max(float(ask), MIN_PRICE_DIVISOR)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -329,6 +382,16 @@ def scan_and_update() -> tuple[int, int, int]:
                         reason = "STOP" if current_price < entry else "TRAILING"
                         msg = f"🛑 [{reason}] {loc['name']} {date} | entry ${entry:.3f} exit ${current_price:.3f} | PnL: {'+' if pnl >= 0 else ''}{pnl:.2f}"
                         _notify(msg)
+                        logger.info(
+                            "[EXEC_QUALITY] city=%s date=%s market=%s expected_edge=%+.4f executed_edge=%+.4f realized_pnl=%+.2f close_reason=%s",
+                            city_slug,
+                            date,
+                            pos.get("market_id"),
+                            pos.get("expected_edge_pretrade", pos.get("edge", 0.0)),
+                            pos.get("executed_edge_post_costs", pos.get("edge", 0.0)),
+                            pnl,
+                            pos.get("close_reason"),
+                        )
 
             # ── CLOSE on forecast shift ──────────────────
             if (
@@ -360,17 +423,28 @@ def scan_and_update() -> tuple[int, int, int]:
                         closed += 1
                         msg = f"🔄 [CLOSE] {loc['name']} {date} — forecast shifted | PnL: {'+' if pnl >= 0 else ''}{pnl:.2f}"
                         _notify(msg)
+                        logger.info(
+                            "[EXEC_QUALITY] city=%s date=%s market=%s expected_edge=%+.4f executed_edge=%+.4f realized_pnl=%+.2f close_reason=%s",
+                            city_slug,
+                            date,
+                            pos.get("market_id"),
+                            pos.get("expected_edge_pretrade", pos.get("edge", 0.0)),
+                            pos.get("executed_edge_post_costs", pos.get("edge", 0.0)),
+                            pnl,
+                            pos.get("close_reason"),
+                        )
 
-            # ── OPEN POSITION (v3.1 — improved) ──────────
+            # ── OPEN POSITION (v3.2 — execution-aware) ─────
             if not mkt.get("position") and forecast_temp is not None and hours >= settings.MIN_HOURS:
-                # 1. Dynamic sigma: base + forecast disagreement
                 base_sigma = get_sigma(city_slug, best_source or "ecmwf")
                 sigma = forecast_disagreement_sigma(all_forecasts, base_sigma)
-
-                # 2. Time-based confidence
+                sigma_size_mult = disagreement_size_multiplier(base_sigma, sigma)
                 conf = confidence_by_time(hours)
+                time_factor = edge_time_factor(hours)
+                adaptive_kelly_fraction = _calculate_adaptive_kelly_fraction(state)
 
                 best_signal = None
+                candidate_signals = []
 
                 # Find the bucket matching our forecast
                 primary_bucket_index = None
@@ -405,18 +479,23 @@ def scan_and_update() -> tuple[int, int, int]:
                             cycle_stats["discard_reasons"]["price"] += 1
                             logger.info("[DISCARD] reason=price city=%s date=%s market=%s detail=invalid_mid", city_slug, date, o["market_id"])
                             continue
-                        spread_ratio = spread / price_mid
-                        if spread_ratio > thresholds["max_relative_spread"]:
+                        if ask < thresholds["min_price"] or ask >= thresholds["max_price"]:
+                            cycle_stats["discard_reasons"]["price"] += 1
+                            logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f range=[%.4f,%.4f)", city_slug, date, o["market_id"], ask, thresholds["min_price"], thresholds["max_price"])
+                            continue
+
+                        relative_spread = _relative_spread(spread, ask)
+                        if relative_spread > thresholds["max_relative_spread"]:
                             cycle_stats["discard_reasons"]["spread_relative"] += 1
-                            logger.info("[DISCARD] reason=spread_relative city=%s date=%s market=%s spread_ratio=%.4f max=%.4f", city_slug, date, o["market_id"], spread_ratio, thresholds["max_relative_spread"])
+                            logger.info("[DISCARD] reason=spread_relative city=%s date=%s market=%s spread_ratio=%.4f max=%.4f", city_slug, date, o["market_id"], relative_spread, thresholds["max_relative_spread"])
                             continue
                         if volume < thresholds["min_volume"]:
                             cycle_stats["discard_reasons"]["volume"] += 1
                             logger.info("[DISCARD] reason=volume city=%s date=%s market=%s volume=%.0f min=%d", city_slug, date, o["market_id"], volume, thresholds["min_volume"])
                             continue
-                        if ask >= thresholds["max_price"]:
-                            cycle_stats["discard_reasons"]["price"] += 1
-                            logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f max=%.4f", city_slug, date, o["market_id"], ask, thresholds["max_price"])
+                        if spread > thresholds["max_slippage"]:
+                            cycle_stats["discard_reasons"]["slippage"] += 1
+                            logger.info("[DISCARD] reason=slippage city=%s date=%s market=%s spread=%.4f max=%.4f", city_slug, date, o["market_id"], spread, thresholds["max_slippage"])
                             continue
 
                         # Raw probability from model
@@ -425,21 +504,25 @@ def scan_and_update() -> tuple[int, int, int]:
                         conf_adj = conf * (ADJACENT_BUCKET_CONFIDENCE_PENALTY if is_adjacent else 1.0)
                         p = max(0.0, min(1.0, p_raw * conf_adj))
 
-                        edge = calc_edge(p, ask)
-                        ev_after_costs = calc_ev_after_costs(p, ask, spread)
-                        if ev_after_costs < thresholds["min_edge"]:
+                        slippage_est = estimate_slippage(spread, thresholds["max_slippage"])
+                        edge_nominal = calc_edge(p, ask)
+                        edge_real = calc_edge_after_costs(p, ask, spread, slippage_est)
+                        edge_adjusted = round(edge_real * time_factor, 4)
+                        ev_after_costs = calc_ev_after_costs(p, ask, spread, slippage_est)
+                        if edge_adjusted < thresholds["min_edge"] or ev_after_costs < thresholds["min_edge"]:
                             cycle_stats["discard_reasons"]["ev"] += 1
-                            logger.info("[DISCARD] reason=ev city=%s date=%s market=%s net_ev=%+.4f min=%+.4f", city_slug, date, o["market_id"], ev_after_costs, thresholds["min_edge"])
+                            logger.info("[DISCARD] reason=ev city=%s date=%s market=%s edge_adj=%+.4f net_ev=%+.4f min=%+.4f", city_slug, date, o["market_id"], edge_adjusted, ev_after_costs, thresholds["min_edge"])
                             continue
 
-                        kelly = calc_kelly(p, ask)
+                        kelly = calc_kelly(p, ask, kelly_fraction=adaptive_kelly_fraction)
                         lm_mult = late_market_multiplier(hours)
-                        kelly_adjusted = min(kelly * lm_mult, 0.25)
+                        edge_size_mult = _calculate_edge_size_multiplier(edge_adjusted)
+                        kelly_adjusted = min(kelly * lm_mult * sigma_size_mult * edge_size_mult, 0.25)
                         size = bet_size(kelly_adjusted, balance)
                         if size < 0.50:
                             continue
 
-                        best_signal = {
+                        signal = {
                             "market_id":     o["market_id"],
                             "question":      o["question"],
                             "bucket_low":    t_low,
@@ -447,16 +530,25 @@ def scan_and_update() -> tuple[int, int, int]:
                             "entry_price":   ask,
                             "bid_at_entry":  bid,
                             "spread":        spread,
+                            "slippage_est":  slippage_est,
                             "shares":        round(size / ask, 2),
                             "cost":          size,
                             "p":             round(p, 4),
                             "p_raw":         round(p_raw, 4),
                             "confidence":    round(conf_adj, 2),
                             "adjusted_confidence": round(conf_adj, 2),
-                            "edge":          round(edge, 4),
+                            "edge":          round(edge_nominal, 4),
+                            "expected_edge_pretrade": round(edge_nominal, 4),
+                            "executed_edge_post_costs": round(edge_real, 4),
+                            "edge_adjusted": edge_adjusted,
+                            "edge_time_factor": round(time_factor, 3),
+                            "trade_rank_score": edge_adjusted,
                             "kelly":         round(kelly_adjusted, 4),
                             "kelly_raw":     round(kelly, 4),
+                            "kelly_fraction_adaptive": adaptive_kelly_fraction,
                             "lm_mult":       lm_mult,
+                            "edge_size_mult": edge_size_mult,
+                            "sigma_size_mult": sigma_size_mult,
                             "bucket_priority": "adjacent" if is_adjacent else "primary",
                             "forecast_temp": forecast_temp,
                             "forecast_src":  best_source,
@@ -470,9 +562,13 @@ def scan_and_update() -> tuple[int, int, int]:
                             "close_reason":  None,
                             "closed_at":     None,
                             "forecast_at_entry": forecast_temp,
+                            "entries_count": 1,
                         }
-                        _set_signal_ev_fields(best_signal, round(ev_after_costs, 4))
-                        break
+                        _set_signal_ev_fields(signal, round(ev_after_costs, 4))
+                        candidate_signals.append(signal)
+
+                if candidate_signals:
+                    best_signal = max(candidate_signals, key=lambda sig: (sig.get("trade_rank_score", 0.0), sig.get("net_ev", 0.0)))
 
                 if best_signal:
                     # Fetch real ask from Polymarket for accurate entry
@@ -482,24 +578,35 @@ def scan_and_update() -> tuple[int, int, int]:
                         if mdata:
                             real_ask = float(mdata.get("bestAsk", best_signal["entry_price"]))
                             real_bid = float(mdata.get("bestBid", best_signal["bid_at_entry"]))
-                            real_spread = round(real_ask - real_bid, 4)
-                            if real_ask >= thresholds["max_price"]:
+                            real_spread = round(max(0.0, real_ask - real_bid), 4)
+                            real_relative_spread = _relative_spread(real_spread, real_ask)
+                            real_slippage = estimate_slippage(real_spread, thresholds["max_slippage"])
+                            if real_ask < thresholds["min_price"] or real_ask >= thresholds["max_price"]:
                                 cycle_stats["discard_reasons"]["price"] += 1
-                                logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f max=%.4f", city_slug, date, best_signal["market_id"], real_ask, thresholds["max_price"])
+                                logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f range=[%.4f,%.4f)", city_slug, date, best_signal["market_id"], real_ask, thresholds["min_price"], thresholds["max_price"])
                                 skip = True
-                            elif real_spread > thresholds["max_slippage"]:
+                            elif real_spread > thresholds["max_slippage"] or real_relative_spread > thresholds["max_relative_spread"]:
                                 cycle_stats["discard_reasons"]["slippage"] += 1
-                                logger.info("[DISCARD] reason=slippage city=%s date=%s market=%s spread=%.4f max=%.4f", city_slug, date, best_signal["market_id"], real_spread, thresholds["max_slippage"])
+                                logger.info("[DISCARD] reason=slippage city=%s date=%s market=%s spread=%.4f ratio=%.4f max=[%.4f,%.4f]", city_slug, date, best_signal["market_id"], real_spread, real_relative_spread, thresholds["max_slippage"], thresholds["max_relative_spread"])
                                 skip = True
                             else:
                                 best_signal["entry_price"] = real_ask
                                 best_signal["bid_at_entry"] = real_bid
                                 best_signal["spread"] = real_spread
+                                best_signal["slippage_est"] = real_slippage
                                 best_signal["shares"] = round(best_signal["cost"] / real_ask, 2)
+                                best_signal["expected_edge_pretrade"] = round(calc_edge(best_signal["p"], real_ask), 4)
+                                executed_edge = calc_edge_after_costs(best_signal["p"], real_ask, real_spread, real_slippage)
+                                best_signal["executed_edge_post_costs"] = round(executed_edge, 4)
+                                best_signal["edge_adjusted"] = round(executed_edge * best_signal.get("edge_time_factor", 1.0), 4)
                                 # Recalculate with real execution data (keep legacy `ev` key for compatibility)
                                 best_signal["edge"] = round(calc_edge(best_signal["p"], real_ask), 4)
-                                real_ev = round(calc_ev_after_costs(best_signal["p"], real_ask, real_spread), 4)
+                                real_ev = round(calc_ev_after_costs(best_signal["p"], real_ask, real_spread, real_slippage), 4)
                                 _set_signal_ev_fields(best_signal, real_ev)
+                                if best_signal["edge_adjusted"] < thresholds["min_edge"] or real_ev < thresholds["min_edge"]:
+                                    cycle_stats["discard_reasons"]["ev"] += 1
+                                    logger.info("[DISCARD] reason=ev city=%s date=%s market=%s edge_adj=%+.4f net_ev=%+.4f min=%+.4f", city_slug, date, best_signal["market_id"], best_signal["edge_adjusted"], real_ev, thresholds["min_edge"])
+                                    skip = True
                     except Exception as e:
                         logger.warning("[SCAN] Could not fetch real ask: %s", e)
 
@@ -549,18 +656,31 @@ def scan_and_update() -> tuple[int, int, int]:
                             cycle_stats["signals_by_city"][city_slug] = cycle_stats["signals_by_city"].get(city_slug, 0) + 1
                             bucket_label = f"{best_signal['bucket_low']}-{best_signal['bucket_high']}{unit_sym}"
                             mode_tag = "🔴 PROD" if production else "🟡 SIM"
+                            forecast_label = (best_signal.get("forecast_src") or "n/a").upper()
                             msg = (
                                 f"📈 [{mode_tag}] BUY {loc['name']} {horizon} {date}\n"
                                 f"   {bucket_label} @ ${best_signal['entry_price']:.3f}\n"
-                                f"   Edge {best_signal['edge']:+.2%} | Net EV {best_signal['net_ev']:+.4f} | ${best_signal['cost']:.2f}\n"
-                                f"   σ={best_signal['sigma']:.1f} | conf={best_signal['confidence']:.0%} | {best_signal['forecast_src'].upper()}"
+                                f"   Edge exp {best_signal['expected_edge_pretrade']:+.2%} | exec {best_signal['executed_edge_post_costs']:+.2%} | Net EV {best_signal['net_ev']:+.4f}\n"
+                                f"   ${best_signal['cost']:.2f} | rank {best_signal.get('trade_rank_score', 0.0):+.4f}\n"
+                                f"   σ={best_signal['sigma']:.1f} | conf={best_signal['confidence']:.0%} | {forecast_label}"
                             )
                             _notify(msg)
+                            logger.info(
+                                "[EXEC_QUALITY] city=%s date=%s market=%s expected_edge=%+.4f executed_edge=%+.4f net_ev=%+.4f slippage=%.4f spread=%.4f",
+                                city_slug,
+                                date,
+                                best_signal["market_id"],
+                                best_signal.get("expected_edge_pretrade", 0.0),
+                                best_signal.get("executed_edge_post_costs", 0.0),
+                                best_signal.get("net_ev", 0.0),
+                                best_signal.get("slippage_est", 0.0),
+                                best_signal.get("spread", 0.0),
+                            )
 
                             # Log prediction for calibration curve (with execution costs)
                             log_prediction(
                                 city=city_slug, date=date,
-                                p=best_signal["p"], edge=best_signal["edge"],
+                                p=best_signal["p"], edge=best_signal.get("executed_edge_post_costs", best_signal["edge"]),
                                 price=best_signal["entry_price"],
                                 source=best_signal["forecast_src"] or "",
                                 sigma=best_signal["sigma"],
@@ -618,6 +738,16 @@ def scan_and_update() -> tuple[int, int, int]:
         result = "WIN" if won else "LOSS"
         msg = f"{emoji} [{result}] {mkt['city_name']} {mkt['date']} | PnL: {'+' if pnl >= 0 else ''}{pnl:.2f}"
         _notify(msg)
+        logger.info(
+            "[EXEC_QUALITY] city=%s date=%s market=%s expected_edge=%+.4f executed_edge=%+.4f realized_pnl=%+.2f resolved=%s",
+            mkt.get("city"),
+            mkt.get("date"),
+            pos.get("market_id"),
+            pos.get("expected_edge_pretrade", pos.get("edge", 0.0)),
+            pos.get("executed_edge_post_costs", pos.get("edge", 0.0)),
+            pnl,
+            result,
+        )
         resolved_count += 1
         save_market(mkt)
         time.sleep(0.3)
@@ -651,27 +781,45 @@ def monitor_positions() -> int:
     state = load_state()
     balance = state["balance"]
     closed = 0
+    scaled = 0
 
     for mkt in open_pos:
         pos = mkt["position"]
         mid = pos["market_id"]
 
-        # Fetch real bestBid
+        # Fetch real bid/ask first
         current_price = None
+        current_bid = None
+        current_ask = None
+        current_spread = 0.0
+        mdata = None
         try:
             mdata = pm_read.get_market_detail(mid)
             if mdata:
                 best_bid = mdata.get("bestBid")
+                best_ask = mdata.get("bestAsk")
                 if best_bid is not None:
-                    current_price = float(best_bid)
+                    current_bid = float(best_bid)
+                if best_ask is not None:
+                    current_ask = float(best_ask)
         except Exception:
             pass
 
-        if current_price is None:
+        if current_bid is None or current_ask is None:
             for o in mkt.get("all_outcomes", []):
                 if o["market_id"] == mid:
-                    current_price = o.get("bid", o["price"])
+                    if current_bid is None:
+                        current_bid = float(o.get("bid", o["price"]))
+                    if current_ask is None:
+                        current_ask = float(o.get("ask", o["price"]))
                     break
+        if current_bid is None:
+            continue
+        if current_ask is None:
+            current_ask = current_bid
+        current_price = current_bid
+        current_spread = max(0.0, current_ask - current_bid)
+
         if current_price is None:
             continue
 
@@ -705,11 +853,88 @@ def monitor_positions() -> int:
             pos["trailing_activated"] = True
             _notify(f"🔒 [TRAILING] {city_name} {mkt['date']} — stop → breakeven ${entry:.3f}")
 
+        # Edge decay monitoring (exit early when live edge collapses)
+        slippage_now = estimate_slippage(current_spread, settings.MAX_SLIPPAGE)
+        current_exec_edge = calc_edge_after_costs(pos.get("p", 0.0), current_ask, current_spread, slippage_now)
+        entry_exec_edge = pos.get("executed_edge_post_costs", pos.get("edge", 0.0))
+        edge_drop = entry_exec_edge - current_exec_edge
+        edge_decay_close = edge_drop >= settings.EDGE_DECAY_EXIT_DELTA or current_exec_edge < -0.01
+
+        # Multi-entry scale-in when edge improves (risk-capped)
+        scale_done = False
+        if (
+            not edge_decay_close
+            and 6 <= hours_left <= 24
+            and current_exec_edge >= (entry_exec_edge + settings.SCALE_IN_EDGE_STEP)
+            and int(pos.get("entries_count") or 1) < MAX_SCALE_IN_ENTRIES
+        ):
+            max_position_cost = min(
+                max(0.0, settings.MAX_BET * settings.MAX_POSITION_MULTIPLIER),
+                max(0.0, float(pos.get("cost", 0.0)) + balance),
+            )
+            remaining_cap = max(0.0, max_position_cost - float(pos.get("cost", 0.0)))
+            scale_cost = min(
+                remaining_cap,
+                max(0.0, float(pos.get("cost", 0.0)) * SCALE_IN_POSITION_FRACTION),
+                max(0.0, balance * SCALE_IN_BALANCE_FRACTION),
+            )
+            scale_cost = round(scale_cost, 2)
+            scale_shares = round(scale_cost / current_ask, 2) if current_ask > 0 else 0.0
+            if scale_cost >= 0.50 and scale_shares > 0:
+                scale_ok = True
+                if _is_production():
+                    scale_ok = False
+                    try:
+                        token_id = None
+                        if mdata:
+                            token_id = mdata.get("clobTokenIds")
+                            if isinstance(token_id, str):
+                                token_ids = json.loads(token_id)
+                                token_id = token_ids[0] if token_ids else None
+                            elif isinstance(token_id, list):
+                                token_id = token_id[0] if token_id else None
+                        if token_id:
+                            resp = pm_trade.place_limit_order(
+                                token_id=token_id,
+                                price=current_ask,
+                                size=scale_shares,
+                                side="BUY",
+                            )
+                            scale_ok = bool(resp)
+                        else:
+                            logger.error("[SCALE_IN] Could not resolve token_id for %s", mid)
+                    except Exception as e:
+                        logger.error("[SCALE_IN] Order failed: %s", e)
+                        scale_ok = False
+
+                if scale_ok:
+                    old_shares = float(pos.get("shares", 0.0))
+                    old_cost = float(pos.get("cost", 0.0))
+                    total_shares = round(old_shares + scale_shares, 2)
+                    total_cost = round(old_cost + scale_cost, 2)
+                    if total_shares > 0:
+                        old_position_value = entry * old_shares
+                        new_position_value = current_ask * scale_shares
+                        weighted_entry = (old_position_value + new_position_value) / total_shares
+                        pos["entry_price"] = round(weighted_entry, 4)
+                    pos["shares"] = total_shares
+                    pos["cost"] = total_cost
+                    pos["entries_count"] = int(pos.get("entries_count") or 1) + 1
+                    pos["scaled_in_at"] = datetime.now(timezone.utc).isoformat()
+                    pos["executed_edge_post_costs"] = round(current_exec_edge, 4)
+                    balance -= scale_cost
+                    scaled += 1
+                    scale_done = True
+                    _notify(
+                        f"➕ [SCALE-IN] {city_name} {mkt['date']} | +${scale_cost:.2f} @ ${current_ask:.3f} | edge {current_exec_edge:+.2%}"
+                    )
+
+        entry = pos["entry_price"]
         take_triggered = take_profit is not None and current_price >= take_profit
         stop_triggered = current_price <= stop
         forecast_close = forecast_shift and hours_left < 6  # only close on shift if close to event
 
-        if take_triggered or stop_triggered or forecast_close:
+        if take_triggered or stop_triggered or forecast_close or edge_decay_close:
             pnl = round((current_price - entry) * pos["shares"], 2)
             balance += pos["cost"] + pnl
             pos["closed_at"] = datetime.now(timezone.utc).isoformat()
@@ -717,6 +942,10 @@ def monitor_positions() -> int:
                 pos["close_reason"] = "take_profit"
                 reason = "TAKE"
                 emoji = "💰"
+            elif edge_decay_close:
+                pos["close_reason"] = "edge_decay_exit"
+                reason = "EDGE"
+                emoji = "📉"
             elif forecast_close:
                 pos["close_reason"] = "forecast_shift_close"
                 reason = "FCAST"
@@ -740,10 +969,24 @@ def monitor_positions() -> int:
                 f"   PnL: {'+' if pnl >= 0 else ''}{pnl:.2f}"
             )
             _notify(msg)
+            logger.info(
+                "[EXEC_QUALITY] city=%s date=%s market=%s expected_edge=%+.4f executed_edge=%+.4f current_edge=%+.4f realized_pnl=%+.2f close_reason=%s",
+                mkt.get("city"),
+                mkt.get("date"),
+                mid,
+                pos.get("expected_edge_pretrade", pos.get("edge", 0.0)),
+                pos.get("executed_edge_post_costs", pos.get("edge", 0.0)),
+                current_exec_edge,
+                pnl,
+                pos.get("close_reason"),
+            )
+            save_market(mkt)
+        elif scale_done:
             save_market(mkt)
 
-    if closed:
+    if closed or scaled:
         state["balance"] = round(balance, 2)
+        state["peak_balance"] = max(float(state.get("peak_balance", balance) or balance), balance)
         save_state(state)
 
     return closed

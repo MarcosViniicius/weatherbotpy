@@ -99,6 +99,8 @@ def _build_api_data() -> dict:
 
         spread = pos.get("spread", 0)
         ev_after_costs = pos.get("ev_after_costs", pos.get("ev", 0))
+        expected_edge = pos.get("expected_edge_pretrade", pos.get("edge", 0))
+        executed_edge = pos.get("executed_edge_post_costs", pos.get("edge", 0))
         
         positions[mid] = {
             "question": question,
@@ -112,7 +114,11 @@ def _build_api_data() -> dict:
             "ev": pos.get("ev", 0),
             "ev_after_costs": ev_after_costs,
             "edge": pos.get("edge", 0),
+            "expected_edge": expected_edge,
+            "executed_edge": executed_edge,
+            "edge_adjusted": pos.get("edge_adjusted", executed_edge),
             "spread": spread,
+            "slippage_est": pos.get("slippage_est", 0),
             "kelly_pct": pos.get("kelly", 0),
             "our_prob": pos.get("p", 0),
             "forecast_temp": pos.get("forecast_temp"),
@@ -120,6 +126,9 @@ def _build_api_data() -> dict:
             "hours_left": round(hrs, 1),
             "sigma": pos.get("sigma", 0),
             "confidence": pos.get("confidence", 1),
+            "trade_rank_score": pos.get("trade_rank_score", 0),
+            "entries_count": pos.get("entries_count", 1),
+            "bucket_priority": pos.get("bucket_priority", "primary"),
             "opened_at": pos.get("opened_at", ""),
         }
 
@@ -145,8 +154,13 @@ def _build_api_data() -> dict:
             "cost": pos["cost"],
             "ev": pos.get("ev", 0),
             "edge": pos.get("edge", 0),
+            "expected_edge": pos.get("expected_edge_pretrade", pos.get("edge", 0)),
+            "executed_edge": pos.get("executed_edge_post_costs", pos.get("edge", 0)),
+            "edge_adjusted": pos.get("edge_adjusted", pos.get("executed_edge_post_costs", pos.get("edge", 0))),
             "kelly_pct": pos.get("kelly", 0),
             "our_prob": pos.get("p", 0),
+            "trade_rank_score": pos.get("trade_rank_score", 0),
+            "entries_count": pos.get("entries_count", 1),
             "opened_at": pos.get("opened_at", ""),
         })
 
@@ -163,6 +177,8 @@ def _build_api_data() -> dict:
                 "closed_at": pos.get("closed_at", ""),
                 "ev": pos.get("ev", 0),
                 "edge": pos.get("edge", 0),
+                "expected_edge": pos.get("expected_edge_pretrade", pos.get("edge", 0)),
+                "executed_edge": pos.get("executed_edge_post_costs", pos.get("edge", 0)),
                 "kelly_pct": pos.get("kelly", 0),
             })
 

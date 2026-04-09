@@ -92,12 +92,17 @@ _DEFAULT_RISK_CONFIG = {
     "balance": 20.0,
     "max_bet": 2.0,
     "min_edge": 0.05,
+    "min_price": 0.08,
     "max_price": 0.60,
     "min_volume": 200,
+    "max_relative_spread": 0.15,
     "min_hours": 2.0,
     "max_hours": 72.0,
     "kelly_fraction": 0.25,
     "max_slippage": 0.02,
+    "edge_decay_exit_delta": 0.03,
+    "scale_in_edge_step": 0.02,
+    "max_position_multiplier": 1.80,
     "scan_interval": 900,
     "calibration_min": 50,
     "relax_stage": 0,
@@ -107,12 +112,17 @@ _RISK_TYPE = {
     "balance": float,
     "max_bet": float,
     "min_edge": float,
+    "min_price": float,
     "max_price": float,
     "min_volume": int,
+    "max_relative_spread": float,
     "min_hours": float,
     "max_hours": float,
     "kelly_fraction": float,
     "max_slippage": float,
+    "edge_decay_exit_delta": float,
+    "scale_in_edge_step": float,
+    "max_position_multiplier": float,
     "scan_interval": int,
     "calibration_min": int,
     "relax_stage": int,
@@ -130,11 +140,16 @@ def _write_risk_toml(risk: dict) -> None:
         "",
         "[risk]",
         f"min_edge = {float(risk.get('min_edge', _DEFAULT_RISK_CONFIG['min_edge']))}",
+        f"min_price = {float(risk.get('min_price', _DEFAULT_RISK_CONFIG['min_price']))}",
         f"max_price = {float(risk.get('max_price', _DEFAULT_RISK_CONFIG['max_price']))}",
         f"kelly_fraction = {float(risk.get('kelly_fraction', _DEFAULT_RISK_CONFIG['kelly_fraction']))}",
+        f"edge_decay_exit_delta = {float(risk.get('edge_decay_exit_delta', _DEFAULT_RISK_CONFIG['edge_decay_exit_delta']))}",
+        f"scale_in_edge_step = {float(risk.get('scale_in_edge_step', _DEFAULT_RISK_CONFIG['scale_in_edge_step']))}",
+        f"max_position_multiplier = {float(risk.get('max_position_multiplier', _DEFAULT_RISK_CONFIG['max_position_multiplier']))}",
         "",
         "[market_filters]",
         f"min_volume = {int(risk.get('min_volume', _DEFAULT_RISK_CONFIG['min_volume']))}",
+        f"max_relative_spread = {float(risk.get('max_relative_spread', _DEFAULT_RISK_CONFIG['max_relative_spread']))}",
         f"min_hours = {float(risk.get('min_hours', _DEFAULT_RISK_CONFIG['min_hours']))}",
         f"max_hours = {float(risk.get('max_hours', _DEFAULT_RISK_CONFIG['max_hours']))}",
         f"max_slippage = {float(risk.get('max_slippage', _DEFAULT_RISK_CONFIG['max_slippage']))}",
@@ -181,8 +196,8 @@ def _load_risk_toml() -> dict:
         # 3) Sectioned schema keys
         section_key_map = {
             "account": ["balance", "max_bet"],
-            "risk": ["min_edge", "max_price", "kelly_fraction"],
-            "market_filters": ["min_volume", "min_hours", "max_hours", "max_slippage"],
+            "risk": ["min_edge", "min_price", "max_price", "kelly_fraction", "edge_decay_exit_delta", "scale_in_edge_step", "max_position_multiplier"],
+            "market_filters": ["min_volume", "max_relative_spread", "min_hours", "max_hours", "max_slippage"],
             "execution": ["scan_interval", "relax_stage"],
             "model": ["calibration_min"],
         }
@@ -220,12 +235,17 @@ _RISK_GLOBAL_MAPPING = {
     "balance": "BALANCE",
     "max_bet": "MAX_BET",
     "min_edge": "MIN_EDGE",
+    "min_price": "MIN_PRICE",
     "max_price": "MAX_PRICE",
     "min_volume": "MIN_VOLUME",
+    "max_relative_spread": "MAX_RELATIVE_SPREAD",
     "min_hours": "MIN_HOURS",
     "max_hours": "MAX_HOURS",
     "kelly_fraction": "KELLY_FRACTION",
     "max_slippage": "MAX_SLIPPAGE",
+    "edge_decay_exit_delta": "EDGE_DECAY_EXIT_DELTA",
+    "scale_in_edge_step": "SCALE_IN_EDGE_STEP",
+    "max_position_multiplier": "MAX_POSITION_MULTIPLIER",
     "scan_interval": "SCAN_INTERVAL",
     "calibration_min": "CALIBRATION_MIN",
     "relax_stage": "RELAX_STAGE",
@@ -255,12 +275,17 @@ def _risk_int(toml_key: str, default: int) -> int:
 BALANCE = _risk_float("balance", 20.0)
 MAX_BET = _risk_float("max_bet", 2.0)
 MIN_EDGE = _risk_float("min_edge", 0.05)  # Minimum net edge (after costs) to enter
+MIN_PRICE = _risk_float("min_price", 0.08)
 MAX_PRICE = _risk_float("max_price", 0.60)
 MIN_VOLUME = _risk_int("min_volume", 200)
+MAX_RELATIVE_SPREAD = _risk_float("max_relative_spread", 0.15)
 MIN_HOURS = _risk_float("min_hours", 2.0)
 MAX_HOURS = _risk_float("max_hours", 72.0)
 KELLY_FRACTION = _risk_float("kelly_fraction", 0.25)
 MAX_SLIPPAGE = _risk_float("max_slippage", 0.02)
+EDGE_DECAY_EXIT_DELTA = _risk_float("edge_decay_exit_delta", 0.03)
+SCALE_IN_EDGE_STEP = _risk_float("scale_in_edge_step", 0.02)
+MAX_POSITION_MULTIPLIER = _risk_float("max_position_multiplier", 1.80)
 SCAN_INTERVAL = _risk_int("scan_interval", 900)
 CALIBRATION_MIN = _risk_int("calibration_min", 50)
 RELAX_STAGE = _risk_int("relax_stage", 0)
@@ -348,12 +373,17 @@ def get_risk_config() -> dict:
         "balance": BALANCE,
         "max_bet": MAX_BET,
         "min_edge": MIN_EDGE,
+        "min_price": MIN_PRICE,
         "max_price": MAX_PRICE,
         "min_volume": MIN_VOLUME,
+        "max_relative_spread": MAX_RELATIVE_SPREAD,
         "min_hours": MIN_HOURS,
         "max_hours": MAX_HOURS,
         "kelly_fraction": KELLY_FRACTION,
         "max_slippage": MAX_SLIPPAGE,
+        "edge_decay_exit_delta": EDGE_DECAY_EXIT_DELTA,
+        "scale_in_edge_step": SCALE_IN_EDGE_STEP,
+        "max_position_multiplier": MAX_POSITION_MULTIPLIER,
         "scan_interval": SCAN_INTERVAL,
         "calibration_min": CALIBRATION_MIN,
         "relax_stage": RELAX_STAGE,

@@ -12,6 +12,9 @@ v3.1 — Improved:
 import math
 from config import settings
 
+BASELINE_SLIPPAGE_POINTS = 0.0025
+SPREAD_SLIPPAGE_FACTOR = 0.25
+
 
 def norm_cdf(x: float) -> float:
     """Standard normal cumulative distribution function."""
@@ -82,23 +85,45 @@ def calc_ev(p: float, price: float) -> float:
     return round(p * (1.0 - price) - (1.0 - p) * price, 4)
 
 
-def calc_ev_after_costs(p: float, entry_price: float, spread: float, slippage_frac: float = 0.005) -> float:
+def estimate_slippage(spread: float, max_slippage: float = 0.02) -> float:
+    """
+    Estimate effective slippage as a function of spread/liquidity quality.
+    Keeps value bounded by configured max_slippage.
+    Formula: slippage = min(max_slippage, BASELINE_SLIPPAGE_POINTS + SPREAD_SLIPPAGE_FACTOR * spread).
+    This adds a small baseline execution cost and scales with wider spreads.
+    """
+    spread = max(0.0, float(spread))
+    cap = max(0.0, float(max_slippage))
+    if cap == 0:
+        return 0.0
+    return round(min(cap, BASELINE_SLIPPAGE_POINTS + (spread * SPREAD_SLIPPAGE_FACTOR)), 4)
+
+
+def calc_edge_after_costs(p: float, entry_price: float, spread: float, slippage_points: float = 0.005) -> float:
+    """Execution-adjusted edge: p - (price + slippage + spread/2)."""
+    if entry_price <= 0 or entry_price > 0.99:
+        return 0.0
+    effective_price = min(entry_price + max(0.0, slippage_points) + max(0.0, spread) / 2.0, 0.99)
+    return round(p - effective_price, 4)
+
+
+def calc_ev_after_costs(p: float, entry_price: float, spread: float, slippage_points: float = 0.005) -> float:
     """
     TRUE expected value after real execution costs.
     entry_price: actual ask we pay
-    spread: bid-ask spread observed
-    slippage_frac: additional slippage (default 0.5% for Polymarket)
+    spread: bid-ask spread observed (absolute price points, e.g. 0.02)
+    slippage_points: additional slippage in absolute price points (default 0.005)
     
     Real cost: (spread/2 + slippage)
     """
-    if entry_price <= 0 or entry_price >= 1:
+    if entry_price <= 0 or entry_price > 0.99:
         return 0.0
-    cost = (spread / 2.0) + slippage_frac
+    cost = (max(0.0, spread) / 2.0) + max(0.0, slippage_points)
     effective_price = min(entry_price + cost, 0.99)
     return round(p * (1.0 - effective_price) - (1.0 - p) * effective_price, 4)
 
 
-def calc_kelly(p: float, price: float) -> float:
+def calc_kelly(p: float, price: float, kelly_fraction: float | None = None) -> float:
     """
     Fractional Kelly criterion for binary markets.
     Full Kelly: f* = (p/price - 1) × price / (1 - price)
@@ -109,7 +134,8 @@ def calc_kelly(p: float, price: float) -> float:
         return 0.0
     # Full Kelly for binary outcome: (p - price) / (1 - price)
     f = (p - price) / (1.0 - price)
-    return round(min(max(0.0, f) * settings.KELLY_FRACTION, 1.0), 4)
+    frac = settings.KELLY_FRACTION if kelly_fraction is None else float(kelly_fraction)
+    return round(min(max(0.0, f) * max(0.0, frac), 1.0), 4)
 
 
 def bet_size(kelly: float, balance: float) -> float:
@@ -151,6 +177,20 @@ def confidence_by_time(hours: float) -> float:
         return 0.65
 
 
+def edge_time_factor(hours: float) -> float:
+    """
+    Time-based edge quality factor.
+    Prioritizes 6h-24h window and discounts long horizons.
+    """
+    if 6 <= hours <= 24:
+        return 1.10
+    if 24 < hours <= 36:
+        return 1.00
+    if 36 < hours <= 48:
+        return 0.90
+    return 0.80
+
+
 def forecast_disagreement_sigma(forecasts: list[float], base_sigma: float) -> float:
     """
     Adjust sigma based on disagreement between forecast models.
@@ -166,6 +206,23 @@ def forecast_disagreement_sigma(forecasts: list[float], base_sigma: float) -> fl
     std_dev = math.sqrt(variance)
 
     return base_sigma + std_dev
+
+
+def disagreement_size_multiplier(base_sigma: float, sigma_real: float) -> float:
+    """
+    Reduce position size when model disagreement widens sigma.
+    Ratio thresholds on (sigma_real - base_sigma)/base_sigma:
+      <=0.10 → 1.00, <=0.25 → 0.90, <=0.50 → 0.75, >0.50 → 0.60.
+    """
+    base = max(0.1, float(base_sigma))
+    ratio = max(0.0, (float(sigma_real) - base) / base)
+    if ratio <= 0.10:
+        return 1.00
+    if ratio <= 0.25:
+        return 0.90
+    if ratio <= 0.50:
+        return 0.75
+    return 0.60
 
 
 def late_market_multiplier(hours: float) -> float:
