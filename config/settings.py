@@ -297,13 +297,14 @@ def validate_production_readiness() -> tuple[list[str], list[str]]:
     warnings = []
 
     weak_passwords = {"changeme", "password", "admin", "12345", "123456", "qwerty"}
-    password = str(DASHBOARD_PASSWORD or "").strip().lower()
+    password_raw = str(DASHBOARD_PASSWORD or "").strip()
+    password = password_raw.lower()
     strong_enough = (
-        len(password) >= 12
-        and re.search(r"[a-z]", password)
-        and re.search(r"[A-Z]", str(DASHBOARD_PASSWORD or ""))
-        and re.search(r"\d", password)
-        and re.search(r"[^A-Za-z0-9]", str(DASHBOARD_PASSWORD or ""))
+        len(password_raw) >= 12
+        and re.search(r"[a-z]", password_raw)
+        and re.search(r"[A-Z]", password_raw)
+        and re.search(r"\d", password_raw)
+        and re.search(r"[^A-Za-z0-9]", password_raw)
     )
     if DASHBOARD_AUTH_ENABLED and (password in weak_passwords or not strong_enough):
         warnings.append("DASHBOARD_PASSWORD is weak for production use")
