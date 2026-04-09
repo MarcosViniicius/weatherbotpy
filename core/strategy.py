@@ -17,7 +17,7 @@ from config.locations import LOCATIONS
 from connectors import polymarket_read as pm_read
 from connectors import polymarket_trade as pm_trade
 from core.math_utils import (
-    bucket_prob, calc_ev, calc_edge, calc_kelly, bet_size, in_bucket,
+    bucket_prob, calc_edge, calc_kelly, bet_size, in_bucket,
     confidence_by_time, forecast_disagreement_sigma, late_market_multiplier,
 )
 from core.calibration import get_sigma, run_calibration, load_cal, log_prediction, record_outcome
@@ -293,13 +293,13 @@ def scan_and_update() -> tuple[int, int, int]:
 
                         # Edge = p - price (correct for binary markets)
                         edge = calc_edge(p, ask)
-                        ev = calc_ev(p, ask)
-                        # TRUE edge after costs
+                        # EV after execution costs (for binary contracts this is
+                        # equivalent to net edge after costs)
                         from core.math_utils import calc_ev_after_costs
                         ev_after_costs = calc_ev_after_costs(p, ask, spread)
 
-                        # Filter: need minimum edge AND positive EV AFTER COSTS
-                        if edge >= settings.MIN_EDGE and ev_after_costs >= settings.MIN_EV * 0.8:
+                        # Filter: require minimum net EV after spread/slippage
+                        if ev_after_costs >= settings.MIN_EDGE:
                             kelly = calc_kelly(p, ask)
 
                             # Late market aggressiveness: boost Kelly 6-18h before event
@@ -322,9 +322,8 @@ def scan_and_update() -> tuple[int, int, int]:
                                     "p_raw":         round(p_raw, 4),
                                     "confidence":    round(conf, 2),
                                     "edge":          round(edge, 4),
-                                    "ev":            round(ev, 4),
-                                "ev_after_costs": round(ev_after_costs, 4),
-                                "kelly":         round(kelly_adjusted, 4),
+                                    "net_ev":        round(ev_after_costs, 4),
+                                    "kelly":         round(kelly_adjusted, 4),
                                 "kelly_raw":     round(kelly, 4),
                                 "lm_mult":       lm_mult,
                                 "forecast_temp": forecast_temp,

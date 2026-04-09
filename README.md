@@ -84,7 +84,6 @@ Não edite `config/risk.toml` (arquivo legado/compatibilidade).
 Chaves:
 - `balance`
 - `max_bet`
-- `min_ev`
 - `min_edge`
 - `max_price`
 - `min_volume`
