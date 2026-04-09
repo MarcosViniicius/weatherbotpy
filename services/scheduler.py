@@ -17,6 +17,8 @@ _scan_task: asyncio.Task | None = None
 _notifications_enabled = False
 _notify_interval = 600  # 10 min default
 _last_notify_time = ""  # ISO timestamp of last notification
+BASE_SCAN_BACKOFF_SECONDS = 60
+MAX_SCAN_BACKOFF_SECONDS = 900
 
 
 def set_notifications(enabled: bool, interval: int = 600):
@@ -169,7 +171,10 @@ async def _scan_loop(notify_func):
 
             except Exception as e:
                 consecutive_scan_failures += 1
-                backoff = min(60 * (2 ** max(0, consecutive_scan_failures - 1)), 900)
+                backoff = min(
+                    BASE_SCAN_BACKOFF_SECONDS * (2 ** max(0, consecutive_scan_failures - 1)),
+                    MAX_SCAN_BACKOFF_SECONDS,
+                )
                 next_scan_allowed_at = asyncio.get_event_loop().time() + backoff
                 logger.error("[SCAN] Error: %s", e)
                 await notify_func(

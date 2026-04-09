@@ -24,6 +24,24 @@ def _get_client():
         logger.error("[CLOB] No valid private key configured — cannot trade")
         return None
 
+    try:
+        from py_clob_client.client import ClobClient
+
+        _client = ClobClient(
+            settings.POLYMARKET_HOST,
+            key=pk,
+            chain_id=settings.POLYMARKET_CHAIN_ID,
+            signature_type=settings.POLYMARKET_SIGNATURE_TYPE,
+            funder=settings.POLYMARKET_FUNDER or None,
+        )
+        _client.set_api_creds(_client.create_or_derive_api_creds())
+        logger.info("[CLOB] Client initialised successfully")
+        return _client
+    except Exception as e:
+        logger.error("[CLOB] Failed to initialise client: %s", e)
+        _client = None
+        return None
+
 
 def _extract_numeric_balance(payload, depth: int = 0) -> float | None:
     """Best-effort extraction of a wallet balance from nested API payloads."""
@@ -95,24 +113,6 @@ def get_wallet_balance() -> float | None:
 
     logger.warning("[CLOB] Could not read wallet balance from client API")
     return None
-
-    try:
-        from py_clob_client.client import ClobClient
-
-        _client = ClobClient(
-            settings.POLYMARKET_HOST,
-            key=pk,
-            chain_id=settings.POLYMARKET_CHAIN_ID,
-            signature_type=settings.POLYMARKET_SIGNATURE_TYPE,
-            funder=settings.POLYMARKET_FUNDER or None,
-        )
-        _client.set_api_creds(_client.create_or_derive_api_creds())
-        logger.info("[CLOB] Client initialised successfully")
-        return _client
-    except Exception as e:
-        logger.error("[CLOB] Failed to initialise client: %s", e)
-        _client = None
-        return None
 
 
 # ═══════════════════════════════════════════════════════════
