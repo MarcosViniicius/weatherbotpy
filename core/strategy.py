@@ -31,7 +31,7 @@ logger = logging.getLogger("weatherbet.strategy")
 # Adjacent buckets are allowed but receive an 8% confidence haircut to keep
 # the primary forecast bucket prioritized while still recovering near-boundary opportunities.
 ADJACENT_BUCKET_CONFIDENCE_PENALTY = 0.92
-MIN_PRICE_DIVISOR = 0.0001
+EPSILON_DIVISOR = 0.0001
 
 # Will be set by the scheduler to push Telegram notifications
 _notify_func = None
@@ -195,6 +195,10 @@ def _calculate_edge_size_multiplier(edge_adjusted: float) -> float:
     if edge_adjusted >= 0.06:
         return 1.10
     return 1.00
+
+
+def _relative_spread(spread: float, ask: float) -> float:
+    return max(0.0, float(spread)) / max(float(ask), EPSILON_DIVISOR)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -470,7 +474,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f range=[%.4f,%.4f)", city_slug, date, o["market_id"], ask, thresholds["min_price"], thresholds["max_price"])
                             continue
 
-                        relative_spread = spread / max(ask, MIN_PRICE_DIVISOR)
+                        relative_spread = _relative_spread(spread, ask)
                         if relative_spread > thresholds["max_relative_spread"]:
                             cycle_stats["discard_reasons"]["spread_relative"] += 1
                             logger.info("[DISCARD] reason=spread_relative city=%s date=%s market=%s spread_ratio=%.4f max=%.4f", city_slug, date, o["market_id"], relative_spread, thresholds["max_relative_spread"])
@@ -565,7 +569,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             real_ask = float(mdata.get("bestAsk", best_signal["entry_price"]))
                             real_bid = float(mdata.get("bestBid", best_signal["bid_at_entry"]))
                             real_spread = round(max(0.0, real_ask - real_bid), 4)
-                            real_relative_spread = real_spread / max(real_ask, MIN_PRICE_DIVISOR)
+                            real_relative_spread = _relative_spread(real_spread, real_ask)
                             real_slippage = estimate_slippage(real_spread, thresholds["max_slippage"])
                             if real_ask < thresholds["min_price"] or real_ask >= thresholds["max_price"]:
                                 cycle_stats["discard_reasons"]["price"] += 1
@@ -852,11 +856,11 @@ def monitor_positions() -> int:
             not edge_decay_close
             and 6 <= hours_left <= 24
             and current_exec_edge >= (entry_exec_edge + settings.SCALE_IN_EDGE_STEP)
-            and int(pos.get("entries_count", 1) or 1) < 2
+            and int(pos.get("entries_count") or 1) < 2
         ):
             max_position_cost = min(
                 max(0.0, settings.MAX_BET * settings.MAX_POSITION_MULTIPLIER),
-                max(0.0, float(pos.get("cost", 0.0)) + max(0.0, balance)),
+                max(0.0, float(pos.get("cost", 0.0)) + balance),
             )
             remaining_cap = max(0.0, max_position_cost - float(pos.get("cost", 0.0)))
             scale_cost = min(remaining_cap, max(0.0, float(pos.get("cost", 0.0)) * 0.35), max(0.0, balance * 0.15))
@@ -901,7 +905,7 @@ def monitor_positions() -> int:
                         pos["entry_price"] = round(weighted_entry, 4)
                     pos["shares"] = total_shares
                     pos["cost"] = total_cost
-                    pos["entries_count"] = int(pos.get("entries_count", 1) or 1) + 1
+                    pos["entries_count"] = int(pos.get("entries_count") or 1) + 1
                     pos["scaled_in_at"] = datetime.now(timezone.utc).isoformat()
                     pos["executed_edge_post_costs"] = round(current_exec_edge, 4)
                     balance -= scale_cost
