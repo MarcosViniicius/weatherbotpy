@@ -91,8 +91,7 @@ LOG_LEVEL = _env("LOG_LEVEL", "INFO").upper()
 _DEFAULT_RISK_CONFIG = {
     "balance": 20.0,
     "max_bet": 2.0,
-    "min_ev": 0.08,
-    "min_edge": 0.07,
+    "min_edge": 0.05,
     "max_price": 0.60,
     "min_volume": 200,
     "min_hours": 2.0,
@@ -106,7 +105,6 @@ _DEFAULT_RISK_CONFIG = {
 _RISK_TYPE = {
     "balance": float,
     "max_bet": float,
-    "min_ev": float,
     "min_edge": float,
     "max_price": float,
     "min_volume": int,
@@ -129,7 +127,6 @@ def _write_risk_toml(risk: dict) -> None:
         f"max_bet = {float(risk.get('max_bet', _DEFAULT_RISK_CONFIG['max_bet']))}",
         "",
         "[risk]",
-        f"min_ev = {float(risk.get('min_ev', _DEFAULT_RISK_CONFIG['min_ev']))}",
         f"min_edge = {float(risk.get('min_edge', _DEFAULT_RISK_CONFIG['min_edge']))}",
         f"max_price = {float(risk.get('max_price', _DEFAULT_RISK_CONFIG['max_price']))}",
         f"kelly_fraction = {float(risk.get('kelly_fraction', _DEFAULT_RISK_CONFIG['kelly_fraction']))}",
@@ -181,7 +178,7 @@ def _load_risk_toml() -> dict:
         # 3) Sectioned schema keys
         section_key_map = {
             "account": ["balance", "max_bet"],
-            "risk": ["min_ev", "min_edge", "max_price", "kelly_fraction"],
+            "risk": ["min_edge", "max_price", "kelly_fraction"],
             "market_filters": ["min_volume", "min_hours", "max_hours", "max_slippage"],
             "execution": ["scan_interval"],
             "model": ["calibration_min"],
@@ -219,7 +216,6 @@ _risk_cfg = _load_risk_toml()
 _RISK_GLOBAL_MAPPING = {
     "balance": "BALANCE",
     "max_bet": "MAX_BET",
-    "min_ev": "MIN_EV",
     "min_edge": "MIN_EDGE",
     "max_price": "MAX_PRICE",
     "min_volume": "MIN_VOLUME",
@@ -254,8 +250,7 @@ def _risk_int(toml_key: str, default: int) -> int:
 
 BALANCE = _risk_float("balance", 20.0)
 MAX_BET = _risk_float("max_bet", 2.0)
-MIN_EV = _risk_float("min_ev", 0.08)
-MIN_EDGE = _risk_float("min_edge", 0.08)  # Minimum edge (p - price) to enter
+MIN_EDGE = _risk_float("min_edge", 0.05)  # Minimum net edge (after costs) to enter
 MAX_PRICE = _risk_float("max_price", 0.60)
 MIN_VOLUME = _risk_int("min_volume", 200)
 MIN_HOURS = _risk_float("min_hours", 2.0)
@@ -347,7 +342,6 @@ def get_risk_config() -> dict:
     return {
         "balance": BALANCE,
         "max_bet": MAX_BET,
-        "min_ev": MIN_EV,
         "min_edge": MIN_EDGE,
         "max_price": MAX_PRICE,
         "min_volume": MIN_VOLUME,

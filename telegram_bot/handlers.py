@@ -24,7 +24,6 @@ logger = logging.getLogger("weatherbet.handlers")
 _RISK_KEYS_ORDER = [
     "balance",
     "max_bet",
-    "min_ev",
     "min_edge",
     "max_price",
     "min_volume",
