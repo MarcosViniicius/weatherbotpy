@@ -29,6 +29,12 @@ cp .env.example .env
 
 3. Ajuste risco em `risk.toml` (ou via Telegram, abaixo).
 
+## Modos de operação
+- **simulation (experimental)**: mantém o modo atual de testes sem ordens reais.
+- **production**: valida credenciais obrigatórias, aplica checagens de prontidão e sincroniza saldo dinamicamente pela API da carteira/CLOB.
+
+Se `PRODUCTION_STRICT_VALIDATION=true`, qualquer alerta crítico de prontidão força fallback automático para `simulation` por segurança operacional.
+
 ## Rodar com Docker (recomendado)
 ```bash
 docker compose up -d --build

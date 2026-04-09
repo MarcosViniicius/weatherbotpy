@@ -27,6 +27,10 @@ def _has_open_positions() -> bool:
 
 def _sync_state_balance_if_idle(state: dict) -> tuple[dict, bool]:
     """Rebase state balance to risk.toml balance when no positions are open."""
+    from services.mode_manager import get_mode
+    if get_mode() == "production":
+        return state, False
+
     desired = float(settings.BALANCE)
     if _has_open_positions():
         return state, False
@@ -53,6 +57,44 @@ def _sync_state_balance_if_idle(state: dict) -> tuple[dict, bool]:
     return state, changed
 
 
+def _sync_state_balance_from_wallet(state: dict) -> tuple[dict, bool]:
+    """In production mode, sync state balance from wallet API when available."""
+    from services.mode_manager import get_mode
+    if get_mode() != "production":
+        return state, False
+
+    try:
+        from connectors.polymarket_trade import get_wallet_balance
+        wallet_balance = get_wallet_balance()
+    except Exception as e:
+        logger.warning("[STATE] Wallet balance sync failed: %s", e)
+        return state, False
+
+    if wallet_balance is None:
+        return state, False
+
+    wallet_balance = round(max(0.0, float(wallet_balance)), 2)
+    current_balance = float(state.get("balance", wallet_balance) or wallet_balance)
+    changed = False
+
+    if abs(current_balance - wallet_balance) >= 0.01:
+        state["balance"] = wallet_balance
+        changed = True
+
+    if not state.get("starting_balance"):
+        state["starting_balance"] = wallet_balance
+        changed = True
+
+    peak = float(state.get("peak_balance", wallet_balance) or wallet_balance)
+    if wallet_balance > peak:
+        state["peak_balance"] = wallet_balance
+        changed = True
+
+    state["balance_source"] = "wallet_api"
+    state["balance_updated_at"] = datetime.now(timezone.utc).isoformat()
+    return state, changed
+
+
 # ═══════════════════════════════════════════════════════════
 # GLOBAL STATE (balance, win/loss counters)
 # ═══════════════════════════════════════════════════════════
@@ -62,8 +104,9 @@ def load_state() -> dict:
     if settings.STATE_FILE.exists():
         try:
             state = json.loads(settings.STATE_FILE.read_text(encoding="utf-8"))
+            state, wallet_changed = _sync_state_balance_from_wallet(state)
             state, changed = _sync_state_balance_if_idle(state)
-            if changed:
+            if changed or wallet_changed:
                 save_state(state)
             return state
         except Exception as e:
@@ -76,6 +119,7 @@ def load_state() -> dict:
         "losses":           0,
         "peak_balance":     settings.BALANCE,
     }
+    state, _ = _sync_state_balance_from_wallet(state)
     return state
 
 

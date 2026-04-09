@@ -39,6 +39,13 @@ def _env_int(key: str, default: int = 0) -> int:
         return default
 
 
+def _env_bool(key: str, default: bool = False) -> bool:
+    raw = os.environ.get(key)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 # ── Paths ────────────────────────────────────────────────
 PROJECT_ROOT = _PROJECT_ROOT
 DATA_DIR = PROJECT_ROOT / "data"
@@ -61,6 +68,7 @@ POLYMARKET_PRIVATE_KEY = _env("POLYMARKET_PRIVATE_KEY")
 POLYMARKET_FUNDER = _env("POLYMARKET_FUNDER")
 POLYMARKET_SIGNATURE_TYPE = _env_int("POLYMARKET_SIGNATURE_TYPE", 0)
 POLYMARKET_TIMEOUT = _env_int("POLYMARKET_TIMEOUT", 15)
+PRODUCTION_STRICT_VALIDATION = _env_bool("PRODUCTION_STRICT_VALIDATION", True)
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 
@@ -277,6 +285,26 @@ def validate_production_credentials() -> list[str]:
     if not POLYMARKET_PRIVATE_KEY or str(POLYMARKET_PRIVATE_KEY).strip().lower().startswith("your-"):
         missing.append("POLYMARKET_PRIVATE_KEY")
     return missing
+
+
+def validate_production_readiness() -> tuple[list[str], list[str]]:
+    """
+    Validate mandatory and recommended production settings.
+    Returns (missing_required, warnings).
+    """
+    missing = validate_production_credentials()
+    warnings = []
+
+    if DASHBOARD_AUTH_ENABLED and DASHBOARD_PASSWORD == "changeme":
+        warnings.append("DASHBOARD_PASSWORD is default ('changeme')")
+    if not DASHBOARD_AUTH_ENABLED:
+        warnings.append("DASHBOARD_AUTH_ENABLED is disabled")
+    if POLYMARKET_TIMEOUT < 10:
+        warnings.append("POLYMARKET_TIMEOUT is very low for production (<10s)")
+    if WEATHER_TIMEOUT < 10:
+        warnings.append("WEATHER_TIMEOUT is very low for production (<10s)")
+
+    return missing, warnings
 
 
 def reload_risk_config() -> dict:
