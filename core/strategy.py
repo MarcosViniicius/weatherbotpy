@@ -117,6 +117,7 @@ def _log_cycle_metrics(stats: dict):
     if signals and stats["signals_by_city"]:
         top_city = max(stats["signals_by_city"], key=stats["signals_by_city"].get)
         concentration = stats["signals_by_city"][top_city] / signals
+    discards_json = json.dumps(stats["discard_reasons"], sort_keys=True)
 
     logger.info(
         "[SCAN_METRICS] stage=%s events=%s/%s markets=%s valid=%s signals=%s avg_net_ev=%+.4f avg_spread=%.4f discards=%s",
@@ -128,7 +129,7 @@ def _log_cycle_metrics(stats: dict):
         signals,
         avg_ev,
         avg_spread,
-        stats["discard_reasons"],
+        discards_json,
     )
     if top_city:
         logger.info("[SCAN_METRICS] signal_concentration top_city=%s ratio=%.2f", top_city, concentration)

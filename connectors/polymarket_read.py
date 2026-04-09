@@ -77,6 +77,7 @@ def get_event(city_slug: str, month: str, day: int, year: int) -> dict | None:
         logger.warning("[GAMMA] Circuit open — skipping get_event")
         return None
 
+    date_label = f"{year:04d}-{month}-{day:02d}"
     candidates = _event_slug_candidates(city_slug, month, day, year)
     for slug in candidates:
         try:
@@ -95,7 +96,7 @@ def get_event(city_slug: str, month: str, day: int, year: int) -> dict | None:
                 if len(data) > 0:
                     return data[0]
         except requests.RequestException as e:
-            logger.warning("[GAMMA] Slug lookup failed slug=%s city=%s date=%s-%s-%s error=%s", slug, city_slug, year, month, day, e)
+            logger.warning("[GAMMA] Slug lookup failed slug=%s city=%s date=%s error=%s", slug, city_slug, date_label, e)
             gamma_cb.record_failure()
             raise
 
@@ -114,18 +115,18 @@ def get_event(city_slug: str, month: str, day: int, year: int) -> dict | None:
             for event in data:
                 if _event_matches_city_and_date(event, city_slug, month, day, year):
                     logger.info(
-                        "[GAMMA] Event resolved via fallback city=%s date=%s-%s-%s slug=%s",
-                        city_slug, year, month, day, event.get("slug"),
+                        "[GAMMA] Event resolved via fallback city=%s date=%s slug=%s",
+                        city_slug, date_label, event.get("slug"),
                     )
                     return event
             logger.warning(
-                "[GAMMA] Event not found city=%s date=%s-%s-%s tried_slugs=%s fallback_count=%d sample_slugs=%s",
-                city_slug, year, month, day, candidates[:5], len(data), sample_slugs,
+                "[GAMMA] Event not found city=%s date=%s tried_slugs=%s fallback_count=%d sample_slugs=%s",
+                city_slug, date_label, candidates[:5], len(data), sample_slugs,
             )
         else:
             logger.warning(
-                "[GAMMA] Event lookup returned non-list payload city=%s date=%s-%s-%s payload_type=%s",
-                city_slug, year, month, day, type(data).__name__,
+                "[GAMMA] Event lookup returned non-list payload city=%s date=%s payload_type=%s",
+                city_slug, date_label, type(data).__name__,
             )
     except requests.RequestException:
         gamma_cb.record_failure()
