@@ -295,8 +295,10 @@ def validate_production_readiness() -> tuple[list[str], list[str]]:
     missing = validate_production_credentials()
     warnings = []
 
-    if DASHBOARD_AUTH_ENABLED and DASHBOARD_PASSWORD == "changeme":
-        warnings.append("DASHBOARD_PASSWORD is default ('changeme')")
+    weak_passwords = {"changeme", "password", "admin", "12345", "123456", "qwerty"}
+    password = str(DASHBOARD_PASSWORD or "").strip().lower()
+    if DASHBOARD_AUTH_ENABLED and (password in weak_passwords or len(password) < 10):
+        warnings.append("DASHBOARD_PASSWORD is weak for production use")
     if not DASHBOARD_AUTH_ENABLED:
         warnings.append("DASHBOARD_AUTH_ENABLED is disabled")
     if POLYMARKET_TIMEOUT < 10:

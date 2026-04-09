@@ -91,7 +91,8 @@ def _sync_state_balance_from_wallet(state: dict) -> tuple[dict, bool]:
         changed = True
 
     state["balance_source"] = "wallet_api"
-    state["balance_updated_at"] = datetime.now(timezone.utc).isoformat()
+    if changed:
+        state["balance_updated_at"] = datetime.now(timezone.utc).isoformat()
     return state, changed
 
 

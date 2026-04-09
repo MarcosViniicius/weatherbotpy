@@ -5,6 +5,7 @@ Only called in production mode.
 """
 
 import logging
+import inspect
 from config import settings
 from connectors.resilience import retry_with_backoff, clob_cb
 
@@ -89,24 +90,32 @@ def get_wallet_balance() -> float | None:
 
     calls = []
     if hasattr(client, "get_balance_allowance"):
-        calls.append(("get_balance_allowance", lambda: client.get_balance_allowance()))
+        calls.append(("get_balance_allowance", client.get_balance_allowance))
     if hasattr(client, "get_collateral"):
-        calls.append(("get_collateral", lambda: client.get_collateral()))
+        calls.append(("get_collateral", client.get_collateral))
     if hasattr(client, "get_usdc_balance"):
-        calls.append(("get_usdc_balance", lambda: client.get_usdc_balance()))
+        calls.append(("get_usdc_balance", client.get_usdc_balance))
     if hasattr(client, "get_balance"):
-        calls.append(("get_balance", lambda: client.get_balance()))
+        calls.append(("get_balance", client.get_balance))
 
-    for name, call in calls:
+    for name, method in calls:
         try:
-            payload = call()
+            sig = inspect.signature(method)
+            required = [
+                p for p in sig.parameters.values()
+                if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+                and p.default is inspect._empty
+            ]
+            if required:
+                continue
+        except Exception:
+            pass
+        try:
+            payload = method()
             value = _extract_numeric_balance(payload)
             if value is not None:
                 clob_cb.record_success()
                 return max(0.0, round(float(value), 2))
-        except TypeError:
-            # Method exists but needs args in this SDK version.
-            continue
         except Exception as e:
             clob_cb.record_failure()
             logger.warning("[CLOB] %s failed while reading wallet balance: %s", name, e)
