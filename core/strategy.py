@@ -452,6 +452,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             "p":             round(p, 4),
                             "p_raw":         round(p_raw, 4),
                             "confidence":    round(conf_adj, 2),
+                            "adjusted_confidence": round(conf_adj, 2),
                             "edge":          round(edge, 4),
                             "kelly":         round(kelly_adjusted, 4),
                             "kelly_raw":     round(kelly, 4),
@@ -551,7 +552,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             msg = (
                                 f"📈 [{mode_tag}] BUY {loc['name']} {horizon} {date}\n"
                                 f"   {bucket_label} @ ${best_signal['entry_price']:.3f}\n"
-                                f"   Edge {best_signal['edge']:+.2%} | EV {best_signal['net_ev']:+.4f} | ${best_signal['cost']:.2f}\n"
+                                f"   Edge {best_signal['edge']:+.2%} | Net EV {best_signal['net_ev']:+.4f} | ${best_signal['cost']:.2f}\n"
                                 f"   σ={best_signal['sigma']:.1f} | conf={best_signal['confidence']:.0%} | {best_signal['forecast_src'].upper()}"
                             )
                             _notify(msg)
