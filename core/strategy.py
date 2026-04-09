@@ -17,7 +17,7 @@ from config.locations import LOCATIONS
 from connectors import polymarket_read as pm_read
 from connectors import polymarket_trade as pm_trade
 from core.math_utils import (
-    bucket_prob, calc_ev, calc_edge, calc_kelly, bet_size, in_bucket,
+    bucket_prob, calc_edge, calc_kelly, bet_size, in_bucket,
     confidence_by_time, forecast_disagreement_sigma, late_market_multiplier,
 )
 from core.calibration import get_sigma, run_calibration, load_cal, log_prediction, record_outcome
@@ -293,7 +293,6 @@ def scan_and_update() -> tuple[int, int, int]:
 
                         # Edge = p - price (correct for binary markets)
                         edge = calc_edge(p, ask)
-                        ev = calc_ev(p, ask)
                         # Net edge after execution costs
                         from core.math_utils import calc_ev_after_costs
                         edge_after_costs = calc_ev_after_costs(p, ask, spread)
@@ -323,7 +322,6 @@ def scan_and_update() -> tuple[int, int, int]:
                                     "confidence":    round(conf, 2),
                                     "edge":          round(edge, 4),
                                     "edge_after_costs": round(edge_after_costs, 4),
-                                    "ev":            round(ev, 4),
                                     "kelly":         round(kelly_adjusted, 4),
                                 "kelly_raw":     round(kelly, 4),
                                 "lm_mult":       lm_mult,
