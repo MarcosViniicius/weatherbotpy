@@ -293,12 +293,13 @@ def scan_and_update() -> tuple[int, int, int]:
 
                         # Edge = p - price (correct for binary markets)
                         edge = calc_edge(p, ask)
-                        # Net edge after execution costs
+                        # EV after execution costs (for binary contracts this is
+                        # equivalent to net edge after costs)
                         from core.math_utils import calc_ev_after_costs
-                        edge_after_costs = calc_ev_after_costs(p, ask, spread)
+                        ev_after_costs = calc_ev_after_costs(p, ask, spread)
 
-                        # Filter: require minimum net edge after spread/slippage
-                        if edge_after_costs >= settings.MIN_EDGE:
+                        # Filter: require minimum net EV after spread/slippage
+                        if ev_after_costs >= settings.MIN_EDGE:
                             kelly = calc_kelly(p, ask)
 
                             # Late market aggressiveness: boost Kelly 6-18h before event
@@ -321,7 +322,7 @@ def scan_and_update() -> tuple[int, int, int]:
                                     "p_raw":         round(p_raw, 4),
                                     "confidence":    round(conf, 2),
                                     "edge":          round(edge, 4),
-                                    "edge_after_costs": round(edge_after_costs, 4),
+                                    "net_ev":        round(ev_after_costs, 4),
                                     "kelly":         round(kelly_adjusted, 4),
                                 "kelly_raw":     round(kelly, 4),
                                 "lm_mult":       lm_mult,
