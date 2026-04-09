@@ -33,9 +33,10 @@ _RISK_KEYS_ORDER = [
     "max_slippage",
     "scan_interval",
     "calibration_min",
+    "relax_stage",
 ]
 
-_RISK_INT_KEYS = {"min_volume", "scan_interval", "calibration_min"}
+_RISK_INT_KEYS = {"min_volume", "scan_interval", "calibration_min", "relax_stage"}
 
 
 def _risk_display_value(key: str, value) -> str:
