@@ -66,7 +66,7 @@ def _rollout_thresholds() -> dict:
     Effective risk thresholds by rollout stage:
       0=baseline, 1=A(min_volume), 2=B(slippage/spread), 3=C(max_price), 4=D(min_edge)
     """
-    stage = max(0, min(int(getattr(settings, "RELAX_STAGE", 0)), 4))
+    stage = max(0, min(int(settings.RELAX_STAGE), 4))
     cfg = {
         "stage": stage,
         "min_volume": int(settings.MIN_VOLUME),
@@ -565,7 +565,7 @@ def scan_and_update() -> tuple[int, int, int]:
                                 sigma=best_signal["sigma"],
                                 confidence=best_signal["confidence"],
                                 spread=best_signal.get("spread", 0.0),
-                                ev_after_costs=best_signal.get("net_ev", best_signal.get("ev_after_costs", 0.0)),
+                                ev_after_costs=best_signal.get("net_ev", 0.0),
                             )
 
             # Market closed by time
