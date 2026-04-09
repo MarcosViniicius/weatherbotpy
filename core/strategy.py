@@ -160,7 +160,7 @@ def _set_signal_ev_fields(signal: dict, ev_value: float) -> None:
     signal["ev"] = ev_value
 
 
-def _adaptive_kelly_fraction(state: dict) -> float:
+def _calculate_adaptive_kelly_fraction(state: dict) -> float:
     """
     Adjust Kelly fraction by drawdown/performance to control risk:
     - deeper drawdown => reduce Kelly
@@ -188,7 +188,7 @@ def _adaptive_kelly_fraction(state: dict) -> float:
     return round(max(0.01, min(0.35, base * mult)), 4)
 
 
-def _edge_size_multiplier(edge_adjusted: float) -> float:
+def _calculate_edge_size_multiplier(edge_adjusted: float) -> float:
     if edge_adjusted >= 0.08:
         return 1.20
     if edge_adjusted >= 0.06:
@@ -426,7 +426,7 @@ def scan_and_update() -> tuple[int, int, int]:
                 sigma_size_mult = disagreement_size_multiplier(base_sigma, sigma)
                 conf = confidence_by_time(hours)
                 time_factor = edge_time_factor(hours)
-                adaptive_kelly_fraction = _adaptive_kelly_fraction(state)
+                adaptive_kelly_fraction = _calculate_adaptive_kelly_fraction(state)
 
                 best_signal = None
                 candidate_signals = []
@@ -464,9 +464,9 @@ def scan_and_update() -> tuple[int, int, int]:
                             cycle_stats["discard_reasons"]["price"] += 1
                             logger.info("[DISCARD] reason=price city=%s date=%s market=%s detail=invalid_mid", city_slug, date, o["market_id"])
                             continue
-                        if ask < thresholds["min_price"]:
+                        if ask < thresholds["min_price"] or ask >= thresholds["max_price"]:
                             cycle_stats["discard_reasons"]["price"] += 1
-                            logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f min=%.4f", city_slug, date, o["market_id"], ask, thresholds["min_price"])
+                            logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f range=[%.4f,%.4f)", city_slug, date, o["market_id"], ask, thresholds["min_price"], thresholds["max_price"])
                             continue
 
                         relative_spread = spread / max(ask, 0.0001)
@@ -477,10 +477,6 @@ def scan_and_update() -> tuple[int, int, int]:
                         if volume < thresholds["min_volume"]:
                             cycle_stats["discard_reasons"]["volume"] += 1
                             logger.info("[DISCARD] reason=volume city=%s date=%s market=%s volume=%.0f min=%d", city_slug, date, o["market_id"], volume, thresholds["min_volume"])
-                            continue
-                        if ask >= thresholds["max_price"]:
-                            cycle_stats["discard_reasons"]["price"] += 1
-                            logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f max=%.4f", city_slug, date, o["market_id"], ask, thresholds["max_price"])
                             continue
                         if spread > thresholds["max_slippage"]:
                             cycle_stats["discard_reasons"]["slippage"] += 1
@@ -505,7 +501,7 @@ def scan_and_update() -> tuple[int, int, int]:
 
                         kelly = calc_kelly(p, ask, kelly_fraction=adaptive_kelly_fraction)
                         lm_mult = late_market_multiplier(hours)
-                        edge_size_mult = _edge_size_multiplier(edge_adjusted)
+                        edge_size_mult = _calculate_edge_size_multiplier(edge_adjusted)
                         kelly_adjusted = min(kelly * lm_mult * sigma_size_mult * edge_size_mult, 0.25)
                         size = bet_size(kelly_adjusted, balance)
                         if size < 0.50:

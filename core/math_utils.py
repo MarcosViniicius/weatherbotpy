@@ -86,6 +86,8 @@ def estimate_slippage(spread: float, max_slippage: float = 0.02) -> float:
     """
     Estimate effective slippage as a function of spread/liquidity quality.
     Keeps value bounded by configured max_slippage.
+    Formula: slippage = min(max_slippage, 0.0025 + 0.25 * spread).
+    This adds a small baseline execution cost and scales with wider spreads.
     """
     spread = max(0.0, float(spread))
     cap = max(0.0, float(max_slippage))
@@ -205,7 +207,11 @@ def forecast_disagreement_sigma(forecasts: list[float], base_sigma: float) -> fl
 
 
 def disagreement_size_multiplier(base_sigma: float, sigma_real: float) -> float:
-    """Reduce position size when model disagreement widens sigma."""
+    """
+    Reduce position size when model disagreement widens sigma.
+    Ratio thresholds on (sigma_real - base_sigma)/base_sigma:
+      <=0.10 → 1.00, <=0.25 → 0.90, <=0.50 → 0.75, >0.50 → 0.60.
+    """
     base = max(0.1, float(base_sigma))
     ratio = max(0.0, (float(sigma_real) - base) / base)
     if ratio <= 0.10:
