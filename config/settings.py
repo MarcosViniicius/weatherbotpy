@@ -6,6 +6,7 @@ Risk parameters are primarily loaded from risk.toml at project root.
 
 import os
 import logging
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -297,7 +298,14 @@ def validate_production_readiness() -> tuple[list[str], list[str]]:
 
     weak_passwords = {"changeme", "password", "admin", "12345", "123456", "qwerty"}
     password = str(DASHBOARD_PASSWORD or "").strip().lower()
-    if DASHBOARD_AUTH_ENABLED and (password in weak_passwords or len(password) < 10):
+    strong_enough = (
+        len(password) >= 12
+        and re.search(r"[a-z]", password)
+        and re.search(r"[A-Z]", str(DASHBOARD_PASSWORD or ""))
+        and re.search(r"\d", password)
+        and re.search(r"[^A-Za-z0-9]", str(DASHBOARD_PASSWORD or ""))
+    )
+    if DASHBOARD_AUTH_ENABLED and (password in weak_passwords or not strong_enough):
         warnings.append("DASHBOARD_PASSWORD is weak for production use")
     if not DASHBOARD_AUTH_ENABLED:
         warnings.append("DASHBOARD_AUTH_ENABLED is disabled")

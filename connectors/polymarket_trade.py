@@ -104,7 +104,7 @@ def get_wallet_balance() -> float | None:
             required = [
                 p for p in sig.parameters.values()
                 if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-                and p.default is inspect._empty
+                and p.default is inspect.Parameter.empty
             ]
             if required:
                 continue
