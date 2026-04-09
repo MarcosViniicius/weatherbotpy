@@ -54,7 +54,7 @@ async def _send_positions_update(notify_func):
     wins = state.get("wins", 0)
     losses = state.get("losses", 0)
     total_trades = state.get("total_trades", 0)
-    start = state.get("starting_balance", 20.0)
+    start = state.get("starting_balance", settings.BALANCE)
     ret_pct = (bal - start) / start * 100 if start > 0 else 0
     ret_sign = "+" if ret_pct >= 0 else ""
 
@@ -137,6 +137,7 @@ async def _scan_loop(notify_func):
     await notify_func("🟢 WeatherBet scheduler started")
 
     while _running:
+        settings.reload_risk_config()
         now_ts = asyncio.get_event_loop().time()
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -214,6 +215,7 @@ def is_running() -> bool:
 async def force_scan(notify_func) -> str:
     """Force an immediate full scan (called via /scan command)."""
     try:
+        settings.reload_risk_config()
         set_notify(notify_func)
         loop = asyncio.get_event_loop()
         new_pos, closed, resolved = await loop.run_in_executor(None, scan_and_update)

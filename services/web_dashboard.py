@@ -61,6 +61,7 @@ def _check_auth(auth_header: str | None) -> bool:
 
 def _build_api_data() -> dict:
     """Build the JSON payload that the dashboard fetches."""
+    settings.reload_risk_config()
     from core.state import load_state, load_all_markets
     from connectors.polymarket_read import hours_to_resolution
     from services.mode_manager import get_mode

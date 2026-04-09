@@ -13,17 +13,62 @@ from config.locations import LOCATIONS
 logger = logging.getLogger("weatherbet.state")
 
 
+def _has_open_positions() -> bool:
+    for f in settings.MARKETS_DIR.glob("*.json"):
+        try:
+            m = json.loads(f.read_text(encoding="utf-8"))
+            pos = m.get("position")
+            if pos and pos.get("status") == "open":
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _sync_state_balance_if_idle(state: dict) -> tuple[dict, bool]:
+    """Rebase state balance to risk.toml balance when no positions are open."""
+    desired = float(settings.BALANCE)
+    if _has_open_positions():
+        return state, False
+
+    old_start = float(state.get("starting_balance", desired) or desired)
+    old_balance = float(state.get("balance", desired) or desired)
+    pnl = old_balance - old_start
+    new_balance = round(max(0.0, desired + pnl), 2)
+
+    changed = False
+    if old_start != desired:
+        state["starting_balance"] = desired
+        changed = True
+    if old_balance != new_balance:
+        state["balance"] = new_balance
+        changed = True
+
+    peak = float(state.get("peak_balance", new_balance) or new_balance)
+    new_peak = max(peak, new_balance, desired)
+    if peak != new_peak:
+        state["peak_balance"] = new_peak
+        changed = True
+
+    return state, changed
+
+
 # ═══════════════════════════════════════════════════════════
 # GLOBAL STATE (balance, win/loss counters)
 # ═══════════════════════════════════════════════════════════
 
 def load_state() -> dict:
+    settings.reload_risk_config()
     if settings.STATE_FILE.exists():
         try:
-            return json.loads(settings.STATE_FILE.read_text(encoding="utf-8"))
+            state = json.loads(settings.STATE_FILE.read_text(encoding="utf-8"))
+            state, changed = _sync_state_balance_if_idle(state)
+            if changed:
+                save_state(state)
+            return state
         except Exception as e:
             logger.error("[STATE] Corrupt state file: %s", e)
-    return {
+    state = {
         "balance":          settings.BALANCE,
         "starting_balance": settings.BALANCE,
         "total_trades":     0,
@@ -31,6 +76,7 @@ def load_state() -> dict:
         "losses":           0,
         "peak_balance":     settings.BALANCE,
     }
+    return state
 
 
 def save_state(state: dict):
@@ -105,6 +151,7 @@ def new_market(city_slug: str, date_str: str, event: dict, hours: float) -> dict
 def clear_simulation_data():
     """Clear all simulation data: markets, state, and predictions log."""
     try:
+        settings.reload_risk_config()
         # Delete all market cache files
         for f in settings.MARKETS_DIR.glob("*.json"):
             try:

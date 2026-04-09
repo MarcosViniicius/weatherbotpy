@@ -27,6 +27,8 @@ services:
     
     # Volume mounts
     volumes:
+      # Risk config — keep host and container in sync
+      - ./risk.toml:/app/risk.toml
       # Persistent data directory — bind mount to local folder
       - ./data:/app/data
       # Optional: logs directory — bind mount to local folder

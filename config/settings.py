@@ -5,6 +5,7 @@ Risk parameters are primarily loaded from risk.toml at project root.
 """
 
 import os
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -16,6 +17,10 @@ except ModuleNotFoundError:  # pragma: no cover
 # Load .env from project root
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
+
+logger = logging.getLogger("weatherbet.settings")
+
+_legacy_divergence_warned = False
 
 
 def _env(key: str, default: str = "") -> str:
@@ -80,6 +85,7 @@ LOG_LEVEL = _env("LOG_LEVEL", "INFO").upper()
 _DEFAULT_RISK_CONFIG = {
     "balance": 20.0,
     "max_bet": 2.0,
+    "min_ev": 0.08,
     "min_edge": 0.07,
     "max_price": 0.60,
     "min_volume": 200,
@@ -94,6 +100,7 @@ _DEFAULT_RISK_CONFIG = {
 _RISK_TYPE = {
     "balance": float,
     "max_bet": float,
+    "min_ev": float,
     "min_edge": float,
     "max_price": float,
     "min_volume": int,
@@ -111,17 +118,37 @@ def _write_risk_toml(risk: dict) -> None:
         "# WeatherBet risk configuration",
         "# Updated via Telegram /setrisk or manual edit",
         "",
+        "[account]",
+        f"balance = {float(risk.get('balance', _DEFAULT_RISK_CONFIG['balance']))}",
+        f"max_bet = {float(risk.get('max_bet', _DEFAULT_RISK_CONFIG['max_bet']))}",
+        "",
         "[risk]",
+        f"min_ev = {float(risk.get('min_ev', _DEFAULT_RISK_CONFIG['min_ev']))}",
+        f"min_edge = {float(risk.get('min_edge', _DEFAULT_RISK_CONFIG['min_edge']))}",
+        f"max_price = {float(risk.get('max_price', _DEFAULT_RISK_CONFIG['max_price']))}",
+        f"kelly_fraction = {float(risk.get('kelly_fraction', _DEFAULT_RISK_CONFIG['kelly_fraction']))}",
+        "",
+        "[market_filters]",
+        f"min_volume = {int(risk.get('min_volume', _DEFAULT_RISK_CONFIG['min_volume']))}",
+        f"min_hours = {float(risk.get('min_hours', _DEFAULT_RISK_CONFIG['min_hours']))}",
+        f"max_hours = {float(risk.get('max_hours', _DEFAULT_RISK_CONFIG['max_hours']))}",
+        f"max_slippage = {float(risk.get('max_slippage', _DEFAULT_RISK_CONFIG['max_slippage']))}",
+        "",
+        "[execution]",
+        f"scan_interval = {int(risk.get('scan_interval', _DEFAULT_RISK_CONFIG['scan_interval']))}",
+        "",
+        "[model]",
+        f"calibration_min = {int(risk.get('calibration_min', _DEFAULT_RISK_CONFIG['calibration_min']))}",
     ]
-    order = list(_DEFAULT_RISK_CONFIG.keys())
-    for key in order:
-        val = risk.get(key, _DEFAULT_RISK_CONFIG[key])
-        if _RISK_TYPE[key] is int:
-            lines.append(f"{key} = {int(val)}")
-        else:
-            lines.append(f"{key} = {float(val)}")
     RISK_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     RISK_CONFIG_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # Keep legacy path synchronized to reduce operator confusion.
+    try:
+        LEGACY_RISK_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LEGACY_RISK_CONFIG_FILE.write_text(RISK_CONFIG_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception as e:
+        logger.warning("[RISK] Could not sync legacy risk file: %s", e)
 
 
 def _migrate_legacy_risk_file_if_needed() -> None:
@@ -132,13 +159,35 @@ def _migrate_legacy_risk_file_if_needed() -> None:
         return
     try:
         RISK_CONFIG_FILE.write_text(LEGACY_RISK_CONFIG_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+        logger.info("[RISK] Migrated legacy config/risk.toml to root risk.toml")
     except Exception:
         # Ignore migration failures; loader will fallback to defaults
-        pass
+        logger.exception("[RISK] Failed migrating legacy risk TOML")
+
+
+def _warn_if_root_legacy_diverge() -> None:
+    global _legacy_divergence_warned
+    if not RISK_CONFIG_FILE.exists() or not LEGACY_RISK_CONFIG_FILE.exists():
+        return
+    try:
+        root_txt = RISK_CONFIG_FILE.read_text(encoding="utf-8").strip()
+        legacy_txt = LEGACY_RISK_CONFIG_FILE.read_text(encoding="utf-8").strip()
+        if root_txt != legacy_txt:
+            if not _legacy_divergence_warned:
+                logger.warning(
+                    "[RISK] Found divergent TOMLs. Root file '%s' is canonical. Syncing legacy '%s'.",
+                    RISK_CONFIG_FILE,
+                    LEGACY_RISK_CONFIG_FILE,
+                )
+                _legacy_divergence_warned = True
+            LEGACY_RISK_CONFIG_FILE.write_text(root_txt + "\n", encoding="utf-8")
+    except Exception as e:
+        logger.warning("[RISK] Could not compare root/legacy TOML files: %s", e)
 
 
 def _load_risk_toml() -> dict:
     _migrate_legacy_risk_file_if_needed()
+    _warn_if_root_legacy_diverge()
 
     if not RISK_CONFIG_FILE.exists():
         _write_risk_toml(_DEFAULT_RISK_CONFIG)
@@ -147,21 +196,77 @@ def _load_risk_toml() -> dict:
     try:
         with RISK_CONFIG_FILE.open("rb") as f:
             raw = tomllib.load(f)
-        section = raw.get("risk", raw)
-        if not isinstance(section, dict):
+        if not isinstance(raw, dict):
+            logger.warning("[RISK] Invalid TOML root type in %s. Using defaults.", RISK_CONFIG_FILE)
             return dict(_DEFAULT_RISK_CONFIG)
+
+        # Accept both legacy flat [risk] and newer sectioned TOML schema.
+        source_values = {}
+
+        # 1) Top-level flat keys
+        for key in _DEFAULT_RISK_CONFIG:
+            if key in raw:
+                source_values[key] = raw.get(key)
+
+        # 2) Legacy [risk] section keys
+        risk_section = raw.get("risk")
+        if isinstance(risk_section, dict):
+            for key in _DEFAULT_RISK_CONFIG:
+                if key in risk_section:
+                    source_values[key] = risk_section.get(key)
+
+        # 3) Sectioned schema keys
+        section_key_map = {
+            "account": ["balance", "max_bet"],
+            "risk": ["min_ev", "min_edge", "max_price", "kelly_fraction"],
+            "market_filters": ["min_volume", "min_hours", "max_hours", "max_slippage"],
+            "execution": ["scan_interval"],
+            "model": ["calibration_min"],
+        }
+        for section_name, keys in section_key_map.items():
+            section = raw.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            for key in keys:
+                if key in section:
+                    source_values[key] = section.get(key)
 
         merged = dict(_DEFAULT_RISK_CONFIG)
         for k, default in _DEFAULT_RISK_CONFIG.items():
-            if k in section and section[k] is not None:
+            if k in source_values and source_values[k] is not None:
                 caster = _RISK_TYPE[k]
-                merged[k] = caster(section[k])
+                try:
+                    merged[k] = caster(source_values[k])
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "[RISK] Invalid value for key '%s' in %s: %r. Keeping default=%r",
+                        k,
+                        RISK_CONFIG_FILE,
+                        source_values[k],
+                        default,
+                    )
         return merged
     except Exception:
+        logger.exception("[RISK] Failed to load risk TOML from %s. Using defaults.", RISK_CONFIG_FILE)
         return dict(_DEFAULT_RISK_CONFIG)
 
 
 _risk_cfg = _load_risk_toml()
+
+_RISK_GLOBAL_MAPPING = {
+    "balance": "BALANCE",
+    "max_bet": "MAX_BET",
+    "min_ev": "MIN_EV",
+    "min_edge": "MIN_EDGE",
+    "max_price": "MAX_PRICE",
+    "min_volume": "MIN_VOLUME",
+    "min_hours": "MIN_HOURS",
+    "max_hours": "MAX_HOURS",
+    "kelly_fraction": "KELLY_FRACTION",
+    "max_slippage": "MAX_SLIPPAGE",
+    "scan_interval": "SCAN_INTERVAL",
+    "calibration_min": "CALIBRATION_MIN",
+}
 
 
 def _risk_float(toml_key: str, default: float) -> float:
@@ -186,7 +291,7 @@ def _risk_int(toml_key: str, default: int) -> int:
 
 BALANCE = _risk_float("balance", 20.0)
 MAX_BET = _risk_float("max_bet", 2.0)
-MIN_EV = _env_float("MIN_EV", 0.08)
+MIN_EV = _risk_float("min_ev", 0.08)
 MIN_EDGE = _risk_float("min_edge", 0.08)  # Minimum edge (p - price) to enter
 MAX_PRICE = _risk_float("max_price", 0.60)
 MIN_VOLUME = _risk_int("min_volume", 200)
@@ -220,11 +325,36 @@ def validate_production_credentials() -> list[str]:
     return missing
 
 
+def reload_risk_config() -> dict:
+    """Reload risk.toml and apply values to live module globals."""
+    global _risk_cfg
+    _risk_cfg = _load_risk_toml()
+    for key, var_name in _RISK_GLOBAL_MAPPING.items():
+        value = _risk_cfg.get(key, _DEFAULT_RISK_CONFIG[key])
+        try:
+            value = _RISK_TYPE[key](value)
+        except (TypeError, ValueError):
+            value = _DEFAULT_RISK_CONFIG[key]
+        globals()[var_name] = value
+    return get_risk_config()
+
+
 def get_risk_config() -> dict:
-    """Current in-memory risk configuration."""
+    """Current risk configuration (reloaded from TOML)."""
+    # Keep all layers in sync with edits made directly in risk.toml.
+    _latest = _load_risk_toml()
+    for key, var_name in _RISK_GLOBAL_MAPPING.items():
+        value = _latest.get(key, _DEFAULT_RISK_CONFIG[key])
+        try:
+            value = _RISK_TYPE[key](value)
+        except (TypeError, ValueError):
+            value = _DEFAULT_RISK_CONFIG[key]
+        globals()[var_name] = value
+
     return {
         "balance": BALANCE,
         "max_bet": MAX_BET,
+        "min_ev": MIN_EV,
         "min_edge": MIN_EDGE,
         "max_price": MAX_PRICE,
         "min_volume": MIN_VOLUME,
@@ -261,19 +391,6 @@ def update_risk_config(key: str, value: str) -> tuple[bool, str]:
     cfg[key] = parsed
     _write_risk_toml(cfg)
 
-    # Apply live in current process
-    mapping = {
-        "balance": "BALANCE",
-        "max_bet": "MAX_BET",
-        "min_edge": "MIN_EDGE",
-        "max_price": "MAX_PRICE",
-        "min_volume": "MIN_VOLUME",
-        "min_hours": "MIN_HOURS",
-        "max_hours": "MAX_HOURS",
-        "kelly_fraction": "KELLY_FRACTION",
-        "max_slippage": "MAX_SLIPPAGE",
-        "scan_interval": "SCAN_INTERVAL",
-        "calibration_min": "CALIBRATION_MIN",
-    }
-    globals()[mapping[key]] = parsed
+    # Apply live in current process from canonical TOML content.
+    reload_risk_config()
     return True, f"Updated {key}={parsed} in {RISK_CONFIG_FILE}"

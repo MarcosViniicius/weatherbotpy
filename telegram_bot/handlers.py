@@ -24,6 +24,7 @@ logger = logging.getLogger("weatherbet.handlers")
 _RISK_KEYS_ORDER = [
     "balance",
     "max_bet",
+    "min_ev",
     "min_edge",
     "max_price",
     "min_volume",
@@ -483,7 +484,7 @@ async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_setrisk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Update a risk setting directly in config/risk.toml."""
+    """Update a risk setting directly in risk.toml."""
     try:
         if not _authorized(update):
             return await _deny(update)

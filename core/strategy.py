@@ -68,6 +68,7 @@ def scan_and_update() -> tuple[int, int, int]:
     Returns (new_positions, closed, resolved).
     """
     from core.forecasts import take_forecast_snapshot
+    settings.reload_risk_config()
 
     now = datetime.now(timezone.utc)
     state = load_state()
@@ -496,6 +497,7 @@ def scan_and_update() -> tuple[int, int, int]:
 
 def monitor_positions() -> int:
     """Quick stop/take-profit check on open positions (runs between full scans)."""
+    settings.reload_risk_config()
     markets = load_all_markets()
     open_pos = [m for m in markets if m.get("position") and m["position"].get("status") == "open"]
     if not open_pos:
