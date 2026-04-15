@@ -151,21 +151,38 @@ def confidence_by_time(hours: float) -> float:
         return 0.65
 
 
-def forecast_disagreement_sigma(forecasts: list[float], base_sigma: float) -> float:
+def forecast_disagreement_sigma(forecasts: list[float], base_sigma: float, hours: float = 24.0) -> float:
     """
-    Adjust sigma based on disagreement between forecast models.
-    Higher disagreement → higher uncertainty → wider distribution.
+    Adjust sigma based on:
+    1. Disagreement between forecast models (std dev of ensemble)
+    2. Forecast horizon (farther out = more uncertain)
 
-    sigma_adjusted = base_sigma + std_dev(forecasts)
+    sigma_adjusted = base_sigma * horizon_factor + std_dev(forecasts)
     """
+    # Horizon scaling: uncertainty grows with time
+    # <12h: 0.8x (METAR/obs dominates, very reliable)
+    # 12-24h: 1.0x (baseline)
+    # 24-48h: 1.3x (meaningful degradation)
+    # >48h: 1.6x (significant uncertainty, near climatology)
+    if hours < 12:
+        horizon_factor = 0.8
+    elif hours <= 24:
+        horizon_factor = 1.0
+    elif hours <= 48:
+        horizon_factor = 1.3
+    else:
+        horizon_factor = 1.6
+
+    scaled_sigma = base_sigma * horizon_factor
+
     if len(forecasts) < 2:
-        return base_sigma
+        return scaled_sigma
 
     mean = sum(forecasts) / len(forecasts)
     variance = sum((f - mean) ** 2 for f in forecasts) / len(forecasts)
     std_dev = math.sqrt(variance)
 
-    return base_sigma + std_dev
+    return scaled_sigma + std_dev
 
 
 def late_market_multiplier(hours: float) -> float:

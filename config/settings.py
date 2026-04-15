@@ -265,10 +265,15 @@ SCAN_INTERVAL = _risk_int("scan_interval", 900)
 CALIBRATION_MIN = _risk_int("calibration_min", 50)
 RELAX_STAGE = _risk_int("relax_stage", 0)
 
-# ── Derived Constants ────────────────────────────────────
-SIGMA_F = 2.0  # Default forecast sigma for Fahrenheit cities
-SIGMA_C = 1.2  # Default forecast sigma for Celsius cities
+# Forecast sigma: real-world MAE from ECMWF verification studies
+# Fahrenheit: D+0 ~2.5°F, D+1 ~3.5°F, D+2 ~5°F → base 3.5°F
+# Celsius: D+0 ~1.5°C, D+1 ~2.0°C, D+2 ~3.0°C → base 2.5°C
+SIGMA_F = 3.5  # Default forecast sigma for Fahrenheit cities (was 2.0)
+SIGMA_C = 2.5  # Default forecast sigma for Celsius cities (was 1.2)
 MONITOR_INTERVAL = 600  # Check positions every 10 min
+
+# Minimum market price to enter — below this, spread/liquidity risk is unacceptable
+MIN_PRICE = 0.05  # Never buy tokens cheaper than 5 cents
 
 MONTHS = [
     "january", "february", "march", "april", "may", "june",

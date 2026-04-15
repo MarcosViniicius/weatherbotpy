@@ -298,18 +298,20 @@ def scan_and_update() -> tuple[int, int, int]:
 
                 if current_price is not None:
                     entry = pos["entry_price"]
-                    # Adaptive stop: tighter as we approach resolution
-                    # Far out (>48h): wider stop (70%) to avoid noise
-                    # Close (<12h): tighter stop (85%) because info is reliable
+                    # Adaptive stop: percentage-based but with an absolute floor.
+                    # For cheap tokens, a tight % stop triggers on noise — use absolute $0.03 min drop.
                     if hours > 48:
-                        stop_pct = 0.70
+                        stop_pct = 0.65   # Far out: loose — forecasts will shift
                     elif hours > 24:
-                        stop_pct = 0.75
+                        stop_pct = 0.70
                     elif hours > 12:
-                        stop_pct = 0.80
+                        stop_pct = 0.75
                     else:
-                        stop_pct = 0.85
-                    default_stop = entry * stop_pct
+                        stop_pct = 0.80   # Near resolution: tighter
+                    
+                    # Absolute floor: never stop unless we've lost at least $0.03 per share
+                    abs_stop = entry - max(entry * (1 - stop_pct), 0.03)
+                    default_stop = max(entry * stop_pct, abs_stop)
                     stop = pos.get("stop_price", default_stop)
 
                     # Trailing: if up 20%+, move stop to breakeven
@@ -363,9 +365,9 @@ def scan_and_update() -> tuple[int, int, int]:
 
             # ── OPEN POSITION (v3.1 — improved) ──────────
             if not mkt.get("position") and forecast_temp is not None and hours >= settings.MIN_HOURS:
-                # 1. Dynamic sigma: base + forecast disagreement
+                # 1. Dynamic sigma: base + forecast disagreement + horizon scaling
                 base_sigma = get_sigma(city_slug, best_source or "ecmwf")
-                sigma = forecast_disagreement_sigma(all_forecasts, base_sigma)
+                sigma = forecast_disagreement_sigma(all_forecasts, base_sigma, hours)
 
                 # 2. Time-based confidence
                 conf = confidence_by_time(hours)
@@ -417,6 +419,11 @@ def scan_and_update() -> tuple[int, int, int]:
                         if ask >= thresholds["max_price"]:
                             cycle_stats["discard_reasons"]["price"] += 1
                             logger.info("[DISCARD] reason=price city=%s date=%s market=%s ask=%.4f max=%.4f", city_slug, date, o["market_id"], ask, thresholds["max_price"])
+                            continue
+                        # MIN_PRICE guard: penny tokens have unacceptable spread/liquidity risk
+                        if ask < settings.MIN_PRICE:
+                            cycle_stats["discard_reasons"]["price"] += 1
+                            logger.info("[DISCARD] reason=min_price city=%s date=%s market=%s ask=%.4f min=%.4f", city_slug, date, o["market_id"], ask, settings.MIN_PRICE)
                             continue
 
                         # Raw probability from model
