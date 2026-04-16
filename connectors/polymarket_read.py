@@ -172,6 +172,34 @@ def get_market_detail(market_id: str) -> dict | None:
         raise
 
 
+def polymarket_market_url(payload: dict | None) -> str:
+    """
+    Best-effort Polymarket permalink from Gamma payloads.
+    Prefers event URLs because they are the most stable public route.
+    """
+    if not isinstance(payload, dict):
+        return ""
+
+    for key in ("eventSlug", "event_slug", "event_slug_id"):
+        slug = str(payload.get(key, "") or "").strip()
+        if slug:
+            return f"https://polymarket.com/event/{slug}"
+
+    event = payload.get("event")
+    if isinstance(event, dict):
+        for key in ("slug", "eventSlug", "event_slug"):
+            slug = str(event.get(key, "") or "").strip()
+            if slug:
+                return f"https://polymarket.com/event/{slug}"
+
+    for key in ("slug", "marketSlug", "market_slug"):
+        slug = str(payload.get(key, "") or "").strip()
+        if slug:
+            return f"https://polymarket.com/market/{slug}"
+
+    return ""
+
+
 def check_market_resolved(market_id: str) -> bool | None:
     """
     Check if a market has closed and who won.

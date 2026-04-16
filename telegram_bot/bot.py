@@ -50,6 +50,8 @@ def build_application() -> Application | None:
     app.add_handler(CommandHandler("production", handlers.cmd_production))
     app.add_handler(CommandHandler("confirm",    handlers.cmd_confirm))
     app.add_handler(CommandHandler("clear",      handlers.cmd_clear))
+    app.add_handler(CommandHandler("close",      handlers.cmd_close_position))
+    app.add_handler(CommandHandler("sell",       handlers.cmd_close_position))
     app.add_handler(CommandHandler("cancel",     handlers.cmd_cancel))
     app.add_handler(CommandHandler("cancelall",  handlers.cmd_cancelall))
     app.add_handler(CommandHandler("notifications", handlers.cmd_notifications))

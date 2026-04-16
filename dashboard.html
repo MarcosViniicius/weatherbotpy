@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -409,40 +409,65 @@ function spawnDelta(v) {
   setTimeout(() => e.remove(), 2500);
 }
 
-function renderPositions(positions) {
+function renderPositions(positions, perf = {}, balance = 0) {
   const el = document.getElementById('pos-list');
-  const keys = Object.keys(positions);
+  const keys = Object.keys(positions || {});
   document.getElementById('pos-badge').textContent = keys.length + ' ACTIVE';
   if (!keys.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
 
-  el.innerHTML = Object.entries(positions).map(([id, p]) => {
+  const deployed = perf.open_cost_basis || 0;
+  const unrealized = perf.unrealized_pnl || 0;
+  const daily = perf.daily_realized_pnl || 0;
+  const esc = (value) => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+  const summary = `<div class="pos-item" style="border-style:dashed">
+    <div class="pos-meta">
+      <div>Capital deployed: <span>$${deployed.toFixed(2)}</span> | Unrealized: <span>${unrealized >= 0 ? '+' : '-'}$${Math.abs(unrealized).toFixed(2)}</span></div>
+      <div>PnL diario: <span>${daily >= 0 ? '+' : '-'}$${Math.abs(daily).toFixed(2)}</span> | Saldo disponivel: <span>$${(balance || 0).toFixed(2)}</span> | Volume total: <span>$${deployed.toFixed(2)}</span></div>
+    </div>
+  </div>`;
+
+  const cards = Object.entries(positions).map(([id, p], idx) => {
     const pnl = p.pnl || 0;
     const entry = p.entry_price || 0;
     const current = p.current_price || entry;
-    const pctMove = entry > 0 ? ((current - entry) / entry * 100) : 0;
+    const cost = p.cost || 0;
+    const marketValue = p.market_value || 0;
+    const pnlPct = cost > 0 ? (pnl / cost * 100) : 0;
     const barPct = Math.min(100, Math.max(5, current * 100));
     const barColor = pnl >= 0 ? 'green' : 'red';
-    const hrs = p.hours_left || 0;
-    const hrsStr = hrs > 0 ? hrs.toFixed(0) + 'h' : '—';
+    const tp = p.take_profit_target;
+    const stop = p.stop_price;
+    const exitSummary = esc(p.exit_status_summary || 'No exit trigger yet');
+    const closeCmd = esc(p.action_close || '');
+    const marketUrl = p.market_url || '';
+    const statusLabel = (p.exit_order_status === 'pending' || p.exit_order_status === 'partial') ? 'Saida pendente' : 'Aberto';
 
     return `<div class="pos-item">
       <div class="pos-top">
-        <div class="pos-q">${(p.side || 'YES')} · ${(p.location || '')} ${p.date || ''} · ${(p.question || '').substr(0, 34)}</div>
+        <div class="pos-q">${idx + 1}. ${esc(p.location || '')} - ${esc(p.question || '')}</div>
         <div class="pos-pnl ${pnl >= 0 ? 'pos' : 'neg'}">${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}</div>
       </div>
       <div class="pos-bar"><div class="pos-fill ${barColor}" style="width:${barPct}%"></div></div>
       <div class="pos-meta">
-        <div>$${entry.toFixed(3)} → $${current.toFixed(3)}</div>
-        <div>Kelly: <span>${(p.kelly_pct * 100).toFixed(1)}%</span></div>
-        <div>Edge: <span>${fmt2((p.edge || 0) * 100)}%</span></div>
-        <div>Fill: <span>${((p.fill_rate || 0) * 100).toFixed(0)}%</span></div>
-        <div>Conf: <span>${(p.confidence * 100).toFixed(0)}%</span></div>
-        <div>Slip: <span>${fmt2(p.entry_slippage_bps || 0)}bps</span></div>
-        <div>Sigma: <span>${parseFloat(p.sigma).toFixed(1)}</span></div>
-        <div>${hrsStr} left</div>
+        <div>${esc(p.side || 'YES')} | ${esc(p.date || '')} | ${esc(p.forecast_src || '')}</div>
+        <div>Med/Atual: <span>${(entry * 100).toFixed(1)}c -> ${(current * 100).toFixed(1)}c</span></div>
+        <div>Custo/Valor: <span>$${cost.toFixed(2)} -> $${marketValue.toFixed(2)}</span></div>
+        <div>PnL: <span>${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)</span></div>
+        <div>Status: <span>${statusLabel}</span> | Exit: <span>${exitSummary}</span></div>
+        <div>TP/SL: <span>${tp != null ? '$' + tp.toFixed(3) : 'off'} / $${(stop || 0).toFixed(3)}</span></div>
+        <div>Edge/Kelly/Conf: <span>${fmt2((p.edge || 0) * 100)}% / ${((p.kelly_pct || 0) * 100).toFixed(1)}% / ${((p.confidence || 0) * 100).toFixed(0)}%</span></div>
+        <div>Fill/Slip/Sigma: <span>${((p.fill_rate || 0) * 100).toFixed(0)}% / ${fmt2(p.entry_slippage_bps || 0)}bps / ${parseFloat(p.sigma || 0).toFixed(1)}</span></div>
+        <div>${closeCmd ? `<code>${closeCmd}</code>` : ''}${marketUrl ? ` • <a href="${marketUrl}" target="_blank" rel="noopener noreferrer">View</a>` : ''}</div>
       </div>
     </div>`;
   }).join('');
+
+  el.innerHTML = summary + cards;
 }
 
 function renderTrades(trades) {
@@ -666,7 +691,7 @@ async function loadData() {
     chart.data.datasets[0].data = [...balHistory];
     chart.update();
 
-    renderPositions(positions);
+    renderPositions(positions, perf, bal);
     renderTrades(trades);
     renderEvLog(trades);
     renderEdgeReality(positions);
@@ -686,3 +711,4 @@ setInterval(tryLoadData, 8000);
 </script>
 </body>
 </html>
+

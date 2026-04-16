@@ -73,6 +73,17 @@ def _execution_metrics(pos: dict) -> dict:
     }
 
 
+def _iso_day(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return parsed.astimezone(timezone.utc).date().isoformat()
+    except Exception:
+        return raw[:10]
+
+
 def _trade_outcome(market: dict, pos: dict) -> str | None:
     if pos.get("status") != "closed":
         return None
@@ -85,6 +96,66 @@ def _trade_outcome(market: dict, pos: dict) -> str | None:
             return None
         return "win" if _safe_float(pnl_value) > 0 else "loss"
     return None
+
+
+def _take_profit_target(entry_price: float, hours_left: float) -> float | None:
+    if entry_price <= 0:
+        return None
+    if hours_left < 6:
+        mult = 1.10
+    elif hours_left < 24:
+        mult = 1.25
+    elif hours_left < 48:
+        mult = 1.60
+    else:
+        mult = 2.00
+    return round(entry_price * mult, 4)
+
+
+def _default_stop_price(entry_price: float, hours_left: float) -> float:
+    if hours_left > 48:
+        stop_pct = 0.65
+    elif hours_left > 24:
+        stop_pct = 0.70
+    elif hours_left > 12:
+        stop_pct = 0.75
+    else:
+        stop_pct = 0.80
+    abs_stop = entry_price - max(entry_price * (1 - stop_pct), 0.03)
+    return round(max(entry_price * stop_pct, abs_stop), 4)
+
+
+def _forecast_shift_active(market: dict, pos: dict) -> bool:
+    entry_forecast = pos.get("forecast_at_entry")
+    if entry_forecast in (None, ""):
+        return False
+    for snap in market.get("forecast_snapshots", []):
+        best = snap.get("best")
+        if best in (None, ""):
+            continue
+        try:
+            if abs(float(best) - float(entry_forecast)) > 2.0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _exit_status_summary(pos: dict, current_price: float, hours_left: float, forecast_shift: bool) -> str:
+    exit_status = str(pos.get("exit_order_status") or "")
+    entry = _safe_float(pos.get("entry_price"))
+    stop_price = _safe_float(pos.get("stop_price"), _default_stop_price(entry, hours_left))
+    take_profit = _take_profit_target(entry, hours_left)
+
+    if exit_status in ("pending", "partial"):
+        return f"sell queued ({exit_status})"
+    if take_profit is not None and current_price >= take_profit:
+        return "take-profit reached"
+    if current_price <= stop_price:
+        return "stop reached"
+    if forecast_shift and hours_left < 6:
+        return "forecast-shift exit ready"
+    return "no exit trigger yet"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -150,6 +221,7 @@ def _build_api_data() -> dict:
         "resolved_count": 0,
         "wins": 0,
         "losses": 0,
+        "daily_realized_pnl": 0.0,
         "open_cost_basis": 0.0,
         "open_market_value": 0.0,
         "unrealized_pnl": 0.0,
@@ -169,6 +241,7 @@ def _build_api_data() -> dict:
         "expected_ev_dollars": 0.0,
         "realized_pnl": 0.0,
     }
+    today_utc = datetime.now(timezone.utc).date().isoformat()
     for m in markets:
         pos = m.get("position")
         if not pos:
@@ -189,7 +262,10 @@ def _build_api_data() -> dict:
 
         if pos.get("status") != "open":
             performance["closed_count"] += 1
-            performance["realized_pnl"] += _safe_float(pos.get("pnl"))
+            realized = _safe_float(pos.get("pnl"))
+            performance["realized_pnl"] += realized
+            if _iso_day(pos.get("closed_at") or m.get("closed_at")) == today_utc:
+                performance["daily_realized_pnl"] += realized
             outcome = _trade_outcome(m, pos)
             if outcome == "win":
                 performance["wins"] += 1
@@ -224,6 +300,10 @@ def _build_api_data() -> dict:
 
         spread = pos.get("spread", 0)
         ev_after_costs = pos.get("ev_after_costs", pos.get("ev", 0))
+        take_profit = _take_profit_target(_safe_float(pos.get("entry_price")), hrs)
+        stop_price = _safe_float(pos.get("stop_price"), _default_stop_price(_safe_float(pos.get("entry_price")), hrs))
+        forecast_shift = _forecast_shift_active(m, pos)
+        exit_status = _exit_status_summary(pos, current_price, hrs, forecast_shift)
         
         positions[mid] = {
             "question": question,
@@ -249,6 +329,14 @@ def _build_api_data() -> dict:
             "sigma": pos.get("sigma", 0),
             "confidence": pos.get("confidence", 1),
             "opened_at": pos.get("opened_at", ""),
+            "market_id": pos.get("market_id", ""),
+            "market_url": pos.get("market_url", m.get("event_url", "")),
+            "action_close": f"/close {pos.get('market_id', '')}".strip(),
+            "stop_price": stop_price,
+            "take_profit_target": take_profit,
+            "forecast_shift_active": forecast_shift,
+            "exit_status_summary": exit_status,
+            "exit_order_status": pos.get("exit_order_status", ""),
             **exec_metrics,
         }
 
@@ -323,6 +411,7 @@ def _build_api_data() -> dict:
     performance["open_cost_basis"] = round(performance["open_cost_basis"], 2)
     performance["open_market_value"] = round(performance["open_market_value"], 2)
     performance["unrealized_pnl"] = round(performance["unrealized_pnl"], 2)
+    performance["daily_realized_pnl"] = round(performance["daily_realized_pnl"], 2)
     performance["realized_pnl"] = round(performance["realized_pnl"], 2)
     performance["equity_balance"] = round(
         performance["cash_balance"] + performance["open_market_value"], 2

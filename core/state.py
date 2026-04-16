@@ -292,12 +292,16 @@ def load_all_markets() -> list[dict]:
 
 def new_market(city_slug: str, date_str: str, event: dict, hours: float) -> dict:
     loc = LOCATIONS[city_slug]
+    event_slug = str(event.get("slug", "") or "")
     return {
         "city":               city_slug,
         "city_name":          loc["name"],
         "date":               date_str,
         "unit":               loc["unit"],
         "station":            loc["station"],
+        "event_slug":         event_slug,
+        "event_title":        event.get("title", ""),
+        "event_url":          f"https://polymarket.com/event/{event_slug}" if event_slug else "",
         "event_end_date":     event.get("endDate", ""),
         "hours_at_discovery": round(hours, 1),
         "status":             "open",

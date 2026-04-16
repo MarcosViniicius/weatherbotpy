@@ -11,7 +11,8 @@ from telegram.ext import ContextTypes
 
 from config.settings import TELEGRAM_CHAT_ID, get_risk_config, update_risk_config, RISK_CONFIG_FILE
 from config.locations import LOCATIONS
-from core.state import load_state, load_all_markets
+from core.state import load_state, load_all_markets, save_market
+from core.strategy import request_manual_close
 from connectors import polymarket_trade as pm_trade
 from connectors import polymarket_read as pm_read
 from services import mode_manager
@@ -121,6 +122,17 @@ def _mode_confirm_inline(code: str) -> InlineKeyboardMarkup:
     )
 
 
+def _screen_actions_inline(refresh_action: str = "wb:refresh") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Refresh", callback_data=refresh_action),
+                InlineKeyboardButton("Main Menu", callback_data="wb:refresh"),
+            ]
+        ]
+    )
+
+
 def _main_menu_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -182,6 +194,35 @@ def _route_menu_action(action: str):
         "wb:notif": cmd_notifications,
         "wb:help": cmd_help,
     }.get(action)
+
+
+def _enrich_market_links(markets: list[dict]) -> list[dict]:
+    changed_any = False
+    for market in markets:
+        pos = market.get("position")
+        if not pos or pos.get("status") != "open":
+            continue
+        if market.get("event_url") or pos.get("market_url"):
+            continue
+        market_id = str(pos.get("market_id", "") or "").strip()
+        if not market_id:
+            continue
+        try:
+            detail = pm_read.get_market_detail(market_id)
+        except Exception:
+            detail = None
+        if not detail:
+            continue
+        permalink = pm_read.polymarket_market_url(detail)
+        if permalink:
+            market["event_url"] = permalink
+            pos["market_url"] = permalink
+            slug = str(detail.get("eventSlug", detail.get("slug", "")) or "").strip()
+            if slug and not market.get("event_slug"):
+                market["event_slug"] = slug
+            save_market(market)
+            changed_any = True
+    return markets
 
 
 async def _handle_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str) -> bool:
@@ -393,19 +434,62 @@ async def _deny(update: Update):
     )
 
 
-async def _safe_reply(update: Update, text: str):
+async def _safe_reply(update: Update, text: str, reply_markup=None):
     """Try MarkdownV2 first; fall back to plain text if parsing fails."""
+    return await _reply_markdown(update, text, reply_markup=reply_markup)
+
+
+def _plain_text(text: str) -> str:
+    import re
+
+    plain = text.replace("\\.", ".").replace("\\-", "-").replace("\\+", "+")
+    plain = plain.replace("\\|", "|").replace("\\(", "(").replace("\\)", ")")
+    plain = plain.replace("\\!", "!").replace("\\=", "=").replace("\\#", "#")
+    plain = re.sub(r"(?<!\w)\*([^*]+)\*(?!\w)", r"\1", plain)
+    plain = re.sub(r"`([^`]+)`", r"\1", plain)
+    return plain
+
+
+async def _reply_text(update: Update, text: str, reply_markup=None):
+    query = update.callback_query
+    if query is not None and query.message is not None:
+        try:
+            await query.edit_message_text(text=text, reply_markup=reply_markup)
+            return
+        except Exception:
+            pass
+    await _message(update).reply_text(text, reply_markup=reply_markup)
+
+
+async def _reply_markdown(update: Update, text: str, reply_markup=None):
+    query = update.callback_query
+    if query is not None and query.message is not None:
+        try:
+            await query.edit_message_text(text=text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+            return
+        except Exception:
+            pass
     try:
-        await _message(update).reply_text(text, parse_mode="MarkdownV2")
+        await _message(update).reply_text(text, parse_mode="MarkdownV2", reply_markup=reply_markup)
     except Exception:
-        # Strip markdown formatting and send as plain text
-        import re
-        plain = text.replace("\\.", ".").replace("\\-", "-").replace("\\+", "+")
-        plain = plain.replace("\\|", "|").replace("\\(", "(").replace("\\)", ")")
-        plain = plain.replace("\\!", "!").replace("\\=", "=").replace("\\#", "#")
-        plain = re.sub(r"(?<!\w)\*([^*]+)\*(?!\w)", r"\1", plain)  # bold
-        plain = re.sub(r"`([^`]+)`", r"\1", plain)  # code
-        await _message(update).reply_text(plain)
+        await _reply_text(update, _plain_text(text), reply_markup=reply_markup)
+
+
+async def _reply_error(update: Update, action_label: str = "this action"):
+    if update.callback_query is not None:
+        try:
+            await update.callback_query.answer("Temporary error", show_alert=True)
+        except Exception:
+            pass
+    await _reply_text(
+        update,
+        f"Could not complete {action_label}. Please try again in a few seconds.",
+        reply_markup=_screen_actions_inline(),
+    )
+
+
+async def _show_main_menu(update: Update):
+    await _reply_markdown(update, _menu_summary(), reply_markup=_main_menu_inline())
 
 # ═══════════════════════════════════════════════════════════
 # INFORMATIONAL COMMANDS
@@ -417,13 +501,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _authorized(update):
             return await _deny(update)
 
-        # Clear legacy reply keyboard if present, then show inline panel
-        await _message(update).reply_text("Refreshing control panel...", reply_markup=ReplyKeyboardRemove())
-        await _safe_reply(update, _menu_summary())
-        await _message(update).reply_text("Choose an action:", reply_markup=_main_menu_inline())
+        if update.callback_query is None:
+            await _message(update).reply_text("Opening control panel...", reply_markup=ReplyKeyboardRemove())
+        await _show_main_menu(update)
     except Exception as e:
         logger.error("[/start] %s", e)
-        await _message(update).reply_text(f"Error: {e}")
+        await _reply_error(update, "the control panel")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -436,12 +519,12 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not _authorized(update):
             return await _deny(update)
-        await _message(update).reply_text("Refreshing control panel...", reply_markup=ReplyKeyboardRemove())
-        await _safe_reply(update, _menu_summary())
-        await _message(update).reply_text("Choose an action:", reply_markup=_main_menu_inline())
+        if update.callback_query is None:
+            await _message(update).reply_text("Opening control panel...", reply_markup=ReplyKeyboardRemove())
+        await _show_main_menu(update)
     except Exception as e:
         logger.error("[/menu] %s", e)
-        await _message(update).reply_text(f"Error: {e}")
+        await _reply_error(update, "the menu")
 
 
 async def cmd_hidemenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -452,7 +535,7 @@ async def cmd_hidemenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _message(update).reply_text("Inline menu is attached to messages in chat. Use /menu to open a fresh panel.")
     except Exception as e:
         logger.error("[/hidemenu] %s", e)
-        await _message(update).reply_text(f"Error: {e}")
+        await _reply_error(update, "this help request")
 
 
 async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -517,15 +600,15 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await _deny(update)
 
         state = load_state()
-        markets = load_all_markets()
+        markets = _enrich_market_links(load_all_markets())
         open_pos = [m for m in markets if m.get("position") and m["position"].get("status") == "open"]
         mode = mode_manager.get_mode()
 
         text = fmt.format_status(state, open_pos, mode)
-        await _safe_reply(update, text)
+        await _safe_reply(update, text, reply_markup=_screen_actions_inline("wb:status"))
     except Exception as e:
         logger.error("[/status] %s", e)
-        await _message(update).reply_text(f"Error: {e}")
+        await _reply_error(update, "status")
 
 
 async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -534,12 +617,13 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _authorized(update):
             return await _deny(update)
 
-        markets = load_all_markets()
-        text = fmt.format_positions(markets)
-        await _safe_reply(update, text)
+        markets = _enrich_market_links(load_all_markets())
+        state = load_state()
+        text = fmt.format_positions(markets, state)
+        await _safe_reply(update, text, reply_markup=_screen_actions_inline("wb:positions"))
     except Exception as e:
         logger.error("[/positions] %s", e)
-        await _message(update).reply_text(f"Error: {e}")
+        await _reply_error(update, "positions")
 
 
 async def cmd_markets(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -591,10 +675,10 @@ async def cmd_markets(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 })
 
         text = fmt.format_markets_list(events_info)
-        await _safe_reply(update, text)
+        await _safe_reply(update, text, reply_markup=_screen_actions_inline("wb:markets"))
     except Exception as e:
         logger.error("[/markets] %s", e)
-        await _message(update).reply_text(f"Error: {e}")
+        await _reply_error(update, "markets")
 
 
 async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -620,10 +704,10 @@ async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"  Price: ${fmt.escape_md(str(order.get('price', '?')))} "
                 f"Side: {fmt.escape_md(str(order.get('side', '?')))}"
             )
-        await _safe_reply(update, "\n".join(lines))
+        await _safe_reply(update, "\n".join(lines), reply_markup=_screen_actions_inline("wb:orders"))
     except Exception as e:
         logger.error("[/orders] %s", e)
-        await _message(update).reply_text(f"Error: {e}")
+        await _reply_error(update, "orders")
 
 
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -634,10 +718,10 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         markets = load_all_markets()
         text = fmt.format_report(markets)
-        await _safe_reply(update, text)
+        await _safe_reply(update, text, reply_markup=_screen_actions_inline("wb:report"))
     except Exception as e:
         logger.error("[/report] %s", e)
-        await _message(update).reply_text(f"Error: {e}")
+        await _reply_error(update, "the report")
 
 
 async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -648,10 +732,10 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         markets = load_all_markets()
         text = fmt.format_daily_report(markets)
-        await _safe_reply(update, text)
+        await _safe_reply(update, text, reply_markup=_screen_actions_inline("wb:daily"))
     except Exception as e:
         logger.error("[/daily] %s", e)
-        await _message(update).reply_text(f"Error: {e}")
+        await _reply_error(update, "the daily report")
 
 
 async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -662,10 +746,10 @@ async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         markets = load_all_markets()
         text = fmt.format_weekly_report(markets)
-        await _safe_reply(update, text)
+        await _safe_reply(update, text, reply_markup=_screen_actions_inline("wb:weekly"))
     except Exception as e:
         logger.error("[/weekly] %s", e)
-        await _message(update).reply_text(f"Error: {e}")
+        await _reply_error(update, "the weekly report")
 
 
 async def cmd_calibration(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -698,10 +782,10 @@ async def cmd_calibration(update: Update, context: ContextTypes.DEFAULT_TYPE):
             n = stats['n']
             lines.append(f"`{bucket.replace('.', '\\.')}`: {pred:.1f}% -> {actual:.1f}% \\(n\\={n}\\)")
 
-        await _safe_reply(update, "\n".join(lines))
+        await _safe_reply(update, "\n".join(lines), reply_markup=_screen_actions_inline("wb:calib"))
     except Exception as e:
         logger.error("[/calibration] %s", e)
-        await _message(update).reply_text(f"Error: {e}")
+        await _reply_error(update, "calibration")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1067,3 +1151,679 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error("[/clear] %s", e)
         await _message(update).reply_text(f"Error: {e}")
+
+
+# Runtime overrides for cleaner Telegram UX and safer error handling.
+
+async def _handle_notifications_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str) -> bool:
+    from services.scheduler import set_notifications, get_notifications_status
+
+    if action == "wb:notif":
+        action = "wb:notif:menu"
+
+    if action == "wb:notif:menu":
+        enabled, interval = get_notifications_status()
+        status = "ENABLED" if enabled else "DISABLED"
+        minutes = max(1, int(interval // 60))
+        await _reply_text(
+            update,
+            f"Notifications: {status}\nCurrent interval: {minutes} min",
+            reply_markup=_notifications_menu_inline(enabled, interval),
+        )
+        return True
+
+    if action == "wb:notif:on":
+        enabled, interval = get_notifications_status()
+        set_notifications(True, interval)
+        await _reply_text(update, "Periodic notifications enabled.", reply_markup=_notifications_menu_inline(True, interval))
+        return True
+
+    if action == "wb:notif:off":
+        _, interval = get_notifications_status()
+        set_notifications(False, interval)
+        await _reply_text(update, "Periodic notifications disabled.", reply_markup=_notifications_menu_inline(False, interval))
+        return True
+
+    if action.startswith("wb:notif:int:"):
+        try:
+            seconds = max(60, int(action.split(":")[-1]))
+        except ValueError:
+            await _reply_text(update, "Invalid interval option.", reply_markup=_notifications_menu_inline(False, 600))
+            return True
+
+        set_notifications(True, seconds)
+        minutes = seconds // 60
+        await _reply_text(
+            update,
+            f"Interval updated to every {minutes} min. Notifications enabled.",
+            reply_markup=_notifications_menu_inline(True, seconds),
+        )
+        return True
+
+    return False
+
+
+async def _handle_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str) -> bool:
+    if action == "wb:mode":
+        action = "wb:mode:menu"
+
+    if action == "wb:mode:menu":
+        mode = mode_manager.get_mode()
+        emoji = "Production" if mode == "production" else "Simulation"
+        await _reply_text(update, f"Current mode: {emoji}\nChoose below:", reply_markup=_mode_menu_inline())
+        return True
+
+    if action == "wb:mode:set:simulation":
+        mode_manager.set_mode("simulation")
+        await _safe_reply(
+            update,
+            "Switched to *simulation mode*\. No real orders will be placed\.",
+            reply_markup=_mode_menu_inline(),
+        )
+        return True
+
+    if action == "wb:mode:reqprod":
+        success, message = mode_manager.request_production()
+        if not success:
+            await _reply_text(update, message, reply_markup=_mode_menu_inline())
+            return True
+
+        code = message.split("Confirmation code: `")[-1].split("`")[0]
+        context.user_data["pending_prod_code"] = code
+        await _safe_reply(update, f"{message}\n\nConfirm via button within 2 minutes\.", reply_markup=_mode_confirm_inline(code))
+        return True
+
+    if action.startswith("wb:mode:confirm:"):
+        code = action.split(":")[-1].strip()
+        success, message = mode_manager.confirm_production(code)
+        if success:
+            await _safe_reply(update, message, reply_markup=_mode_menu_inline())
+        else:
+            await _reply_text(update, message, reply_markup=_mode_menu_inline())
+        return True
+
+    return False
+
+
+async def _handle_risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str) -> bool:
+    if action == "wb:risk:cancel_edit":
+        context.user_data.pop("pending_risk_key", None)
+        await _reply_text(update, "Risk edit canceled.", reply_markup=_risk_menu_inline())
+        return True
+
+    if action == "wb:risk":
+        context.user_data.pop("pending_risk_key", None)
+        risk = get_risk_config()
+        lines = [
+            "*Risk Configuration*",
+            f"Source: `{fmt.escape_md(str(RISK_CONFIG_FILE))}`",
+            "",
+        ]
+        for key in _RISK_KEYS_ORDER:
+            value = risk.get(key)
+            lines.append(f"• `{fmt.escape_md(key)}` = `{fmt.escape_md(_risk_display_value(key, value))}`")
+
+        await _safe_reply(update, "\n".join(lines), reply_markup=_risk_menu_inline())
+        return True
+
+    if action.startswith("wb:risk:key:"):
+        key = action.split(":")[-1]
+        risk = get_risk_config()
+        if key not in risk:
+            await _reply_text(update, "Unknown risk key.", reply_markup=_risk_menu_inline())
+            return True
+
+        context.user_data["pending_risk_key"] = key
+        current = _risk_display_value(key, risk[key])
+        expected = "integer" if key in _RISK_INT_KEYS else "number"
+        await _safe_reply(
+            update,
+            f"Editing `{fmt.escape_md(key)}`\nCurrent: `{fmt.escape_md(current)}`\nExpected type: `{expected}`\n\nSend the new value in chat\.",
+            reply_markup=_risk_edit_prompt_keyboard(),
+        )
+        return True
+
+    return False
+
+
+async def cmd_iniciar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+        if is_running():
+            await _reply_text(update, "Bot is already running.", reply_markup=_screen_actions_inline("wb:start"))
+            return
+        start_scheduler(notify)
+        await _reply_text(update, "Bot started. Scheduler is active again.", reply_markup=_screen_actions_inline("wb:start"))
+    except Exception as e:
+        logger.error("[/iniciar] %s", e)
+        await _reply_error(update, "starting the bot")
+
+
+async def cmd_parar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+        if not is_running():
+            await _reply_text(update, "Bot is already stopped.", reply_markup=_screen_actions_inline("wb:stop"))
+            return
+        stop_scheduler()
+        await _reply_text(update, "Bot paused. Scheduler stopped and Telegram stays online.", reply_markup=_screen_actions_inline("wb:stop"))
+    except Exception as e:
+        logger.error("[/parar] %s", e)
+        await _reply_error(update, "stopping the bot")
+
+
+async def cmd_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+
+        query = update.callback_query
+        if query is None:
+            return
+
+        await query.answer()
+        action = query.data or ""
+
+        if not action.startswith("wb:"):
+            await query.answer("Unknown action", show_alert=False)
+            return
+
+        if await _handle_notifications_callback(update, context, action):
+            return
+        if await _handle_mode_callback(update, context, action):
+            return
+        if await _handle_risk_callback(update, context, action):
+            return
+
+        if action == "wb:refresh":
+            await _show_main_menu(update)
+            return
+
+        handler = _route_menu_action(action)
+        if handler is None:
+            await query.answer("Unknown action", show_alert=False)
+            return
+
+        await handler(update, context)
+    except Exception as e:
+        logger.exception("[menu_callback] %s", e)
+        await _reply_error(update, "this menu action")
+
+
+async def cmd_menu_text_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+
+        text = (update.message.text or "").strip() if update.message else ""
+        normalized = text.lower().replace("\ufe0f", "").strip()
+
+        pending_risk_key = context.user_data.get("pending_risk_key")
+        if pending_risk_key and text and not text.startswith("/"):
+            ok, msg = update_risk_config(pending_risk_key, text)
+            if ok:
+                context.user_data.pop("pending_risk_key", None)
+                await _reply_text(update, f"Updated {pending_risk_key} to {text}.", reply_markup=_risk_menu_inline())
+            else:
+                await _reply_text(update, f"{msg}\nType another value or tap Cancel Edit.", reply_markup=_risk_edit_prompt_keyboard())
+            return
+
+        action = None
+        if "status" in normalized:
+            action = "wb:status"
+        elif "position" in normalized:
+            action = "wb:positions"
+        elif "market" in normalized:
+            action = "wb:markets"
+        elif "order" in normalized:
+            action = "wb:orders"
+        elif "scan" in normalized:
+            action = "wb:scan"
+        elif "notification" in normalized:
+            action = "wb:notif"
+        elif "start bot" in normalized or normalized.startswith("start"):
+            action = "wb:start"
+        elif "stop bot" in normalized or normalized.startswith("stop") or "pause" in normalized:
+            action = "wb:stop"
+        elif normalized.endswith("mode") or normalized == "mode":
+            action = "wb:mode"
+        elif "calibration" in normalized:
+            action = "wb:calib"
+        elif "risk" in normalized:
+            action = "wb:risk"
+        elif "report" in normalized:
+            action = "wb:report"
+        elif "daily" in normalized:
+            action = "wb:daily"
+        elif "weekly" in normalized:
+            action = "wb:weekly"
+        elif "simulation" in normalized:
+            action = "wb:simulate"
+        elif "production" in normalized:
+            action = "wb:production"
+        elif "refresh" in normalized or "atualizar" in normalized:
+            action = "wb:refresh"
+        elif "help" in normalized or "ajuda" in normalized:
+            action = "wb:help"
+
+        if not action:
+            if normalized in {"menu", "/menu", "start", "/start"}:
+                await cmd_start(update, context)
+            return
+
+        if action == "wb:refresh":
+            await _message(update).reply_text("Opening control panel...", reply_markup=ReplyKeyboardRemove())
+            await _show_main_menu(update)
+            return
+
+        handler = _route_menu_action(action)
+        if handler:
+            await handler(update, context)
+    except Exception as e:
+        logger.exception("[menu_text_fallback] %s", e)
+        await _reply_error(update, "this text command")
+
+
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+        await _reply_text(update, "Starting manual scan...", reply_markup=_screen_actions_inline("wb:scan"))
+        result = await force_scan(notify)
+        await _reply_text(update, result, reply_markup=_screen_actions_inline("wb:scan"))
+    except Exception as e:
+        logger.error("[/scan] %s", e)
+        await _reply_error(update, "the manual scan")
+
+
+async def cmd_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+
+        from services.scheduler import set_notifications, get_notifications_status
+
+        enabled, interval = get_notifications_status()
+        args = context.args
+
+        if args and args[0].lower() in ("off", "0", "stop", "disable"):
+            set_notifications(False)
+            await _reply_text(update, "Periodic notifications disabled.", reply_markup=_notifications_menu_inline(False, interval))
+            return
+
+        if args and args[0].lower() in ("on", "1", "start", "enable"):
+            minutes = 10
+            if len(args) > 1:
+                try:
+                    minutes = max(1, int(args[1]))
+                except ValueError:
+                    pass
+            set_notifications(True, minutes * 60)
+            await _reply_text(update, f"Periodic notifications enabled.\nInterval: every {minutes} min", reply_markup=_notifications_menu_inline(True, minutes * 60))
+            return
+
+        if enabled:
+            set_notifications(False)
+            await _reply_text(update, "Periodic notifications disabled.", reply_markup=_notifications_menu_inline(False, interval))
+        else:
+            minutes = 10
+            set_notifications(True, minutes * 60)
+            await _reply_text(update, "Periodic notifications enabled.\nInterval: every 10 min", reply_markup=_notifications_menu_inline(True, minutes * 60))
+    except Exception as e:
+        logger.error("[/notifications] %s", e)
+        await _reply_error(update, "notifications")
+
+
+async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+        mode = mode_manager.get_mode()
+        emoji = "Production" if mode == "production" else "Simulation"
+        await _reply_text(update, f"Current mode: {emoji}", reply_markup=_screen_actions_inline("wb:mode"))
+    except Exception as e:
+        logger.error("[/mode] %s", e)
+        await _reply_error(update, "mode")
+
+
+async def cmd_simulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+        mode_manager.set_mode("simulation")
+        await _safe_reply(update, "Switched to *simulation mode*\. No real orders will be placed\.", reply_markup=_screen_actions_inline("wb:mode"))
+    except Exception as e:
+        logger.error("[/simulate] %s", e)
+        await _reply_error(update, "simulation mode")
+
+
+async def cmd_production(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+        success, message = mode_manager.request_production()
+        if success:
+            await _safe_reply(update, message, reply_markup=_screen_actions_inline("wb:mode"))
+        else:
+            await _reply_text(update, message, reply_markup=_screen_actions_inline("wb:mode"))
+    except Exception as e:
+        logger.error("[/production] %s", e)
+        await _reply_error(update, "production mode")
+
+
+async def cmd_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+        args = context.args
+        if not args:
+            await _reply_text(update, "Usage: /confirm <6-digit-code>", reply_markup=_screen_actions_inline("wb:mode"))
+            return
+        code = args[0]
+        success, message = mode_manager.confirm_production(code)
+        if success:
+            await _safe_reply(update, message, reply_markup=_screen_actions_inline("wb:mode"))
+        else:
+            await _reply_text(update, message, reply_markup=_screen_actions_inline("wb:mode"))
+    except Exception as e:
+        logger.error("[/confirm] %s", e)
+        await _reply_error(update, "production confirmation")
+
+
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+        mode = mode_manager.get_mode()
+        if mode != "simulation":
+            await _safe_reply(update, "Unsafe in *production mode*\. Use /simulate first\.", reply_markup=_screen_actions_inline())
+            return
+
+        from core.state import clear_simulation_data
+
+        success, message = clear_simulation_data()
+        if success:
+            await _safe_reply(update, message, reply_markup=_screen_actions_inline())
+        else:
+            await _reply_text(update, message, reply_markup=_screen_actions_inline())
+    except Exception as e:
+        logger.error("[/clear] %s", e)
+        await _reply_error(update, "clearing simulation data")
+
+
+async def cmd_markets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+
+        await _reply_text(update, "Scanning markets...", reply_markup=_screen_actions_inline("wb:markets"))
+
+        from config.settings import MONTHS
+
+        now = datetime.now(timezone.utc)
+        events_info = []
+        for city_slug, loc in list(LOCATIONS.items())[:10]:
+            for i in range(3):
+                dt = now + timedelta(days=i)
+                date_str = dt.strftime("%Y-%m-%d")
+                event = pm_read.get_event(city_slug, MONTHS[dt.month - 1], dt.day, dt.year)
+                if not event:
+                    continue
+                markets_list = event.get("markets", [])
+                if not markets_list:
+                    continue
+
+                top_price = 0
+                top_bucket = "?"
+                unit_sym = "F" if loc["unit"] == "F" else "C"
+                for market in markets_list:
+                    try:
+                        prices = json.loads(market.get("outcomePrices", "[0.5,0.5]"))
+                        price = float(prices[0])
+                        if price > top_price:
+                            top_price = price
+                            rng = pm_read.parse_temp_range(market.get("question", ""))
+                            if rng:
+                                top_bucket = f"{rng[0]}-{rng[1]}{unit_sym}"
+                    except Exception:
+                        pass
+
+                events_info.append(
+                    {
+                        "city_name": loc["name"],
+                        "date": date_str,
+                        "bucket_count": len(markets_list),
+                        "top_bucket": top_bucket,
+                        "top_price": top_price,
+                    }
+                )
+
+        await _safe_reply(
+            update,
+            fmt.format_markets_list(events_info),
+            reply_markup=_screen_actions_inline("wb:markets"),
+        )
+    except Exception as e:
+        logger.error("[/markets] %s", e)
+        await _reply_error(update, "markets")
+
+
+async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+
+        mode = mode_manager.get_mode()
+        if mode != "production":
+            await _reply_text(update, "Orders are only available in production mode. Use /production to activate.", reply_markup=_screen_actions_inline("wb:orders"))
+            return
+
+        orders = pm_trade.get_open_orders()
+        if not orders:
+            await _reply_text(update, "No open orders on the CLOB.", reply_markup=_screen_actions_inline("wb:orders"))
+            return
+
+        lines = [f"*Open Orders* ({len(orders)})\n"]
+        for order in orders[:15]:
+            lines.append(
+                f"• ID: `{fmt.escape_md(str(order.get('id', '?')))}`\n"
+                f"  Price: ${fmt.escape_md(str(order.get('price', '?')))} "
+                f"Side: {fmt.escape_md(str(order.get('side', '?')))}"
+            )
+
+        await _safe_reply(update, "\n".join(lines), reply_markup=_screen_actions_inline("wb:orders"))
+    except Exception as e:
+        logger.error("[/orders] %s", e)
+        await _reply_error(update, "orders")
+
+
+async def cmd_calibration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+
+        from core.calibration import compute_calibration_report
+
+        rep = compute_calibration_report()
+        if rep["total"] == 0:
+            await _safe_reply(update, "*Calibration*\nNo resolved predictions yet.", reply_markup=_screen_actions_inline("wb:calib"))
+            return
+
+        lines = [
+            "*Forecast Calibration*",
+            f"Total Predictions: {rep['total']}",
+            f"Brier Score: {rep['brier_score']:.4f} \\(closer to 0 is better\\)",
+            f"Trade Hit Rate: {rep['hit_rate']:.1%} \\(resolved executed trades\\)",
+            "",
+            "*Curve* \\(Predicted vs Actual\\):",
+        ]
+        for bucket, stats in rep.get("calibration_curve", {}).items():
+            pred = stats["predicted_avg"] * 100
+            actual = stats["actual_win_rate"] * 100
+            n = stats["n"]
+            lines.append(f"`{bucket.replace('.', '\\.')}`: {pred:.1f}% -> {actual:.1f}% \\(n\\={n}\\)")
+
+        await _safe_reply(update, "\n".join(lines), reply_markup=_screen_actions_inline("wb:calib"))
+    except Exception as e:
+        logger.error("[/calibration] %s", e)
+        await _reply_error(update, "calibration")
+
+
+async def cmd_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+
+        risk = get_risk_config()
+        lines = [
+            "*Risk Configuration*",
+            f"Source: `{fmt.escape_md(str(RISK_CONFIG_FILE))}`",
+            "",
+        ]
+        for key in _RISK_KEYS_ORDER:
+            if key in risk:
+                lines.append(f"• `{fmt.escape_md(key)}` = `{fmt.escape_md(_risk_display_value(key, risk[key]))}`")
+
+        lines.extend(
+            [
+                "",
+                "Use `/setrisk <key> <value>` or select a field below.",
+            ]
+        )
+        await _safe_reply(update, "\n".join(lines), reply_markup=_risk_menu_inline())
+    except Exception as e:
+        logger.error("[/risk] %s", e)
+        await _reply_error(update, "risk settings")
+
+
+async def cmd_setrisk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+
+        args = context.args
+        if len(args) < 2:
+            await _reply_text(
+                update,
+                "Usage: /setrisk <key> <value>\nExample: /setrisk min_edge 0.08",
+                reply_markup=_risk_menu_inline(),
+            )
+            return
+
+        key = args[0]
+        value = " ".join(args[1:]).strip()
+        ok, msg = update_risk_config(key, value)
+        if not ok:
+            await _reply_text(update, msg, reply_markup=_risk_menu_inline())
+            return
+
+        context.user_data.pop("pending_risk_key", None)
+        await _reply_text(
+            update,
+            f"{msg}\nChanges were applied to TOML and runtime.",
+            reply_markup=_risk_menu_inline(),
+        )
+    except Exception as e:
+        logger.error("[/setrisk] %s", e)
+        await _reply_error(update, "updating risk settings")
+
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+
+        if mode_manager.get_mode() != "production":
+            await _reply_text(
+                update,
+                "Order cancellation is only available in production mode.",
+                reply_markup=_screen_actions_inline("wb:orders"),
+            )
+            return
+
+        args = context.args
+        if not args:
+            await _reply_text(
+                update,
+                "Usage: /cancel <order_id>",
+                reply_markup=_screen_actions_inline("wb:orders"),
+            )
+            return
+
+        order_id = args[0]
+        result = pm_trade.cancel_order(order_id)
+        if result:
+            await _reply_text(
+                update,
+                f"Order {order_id} canceled.",
+                reply_markup=_screen_actions_inline("wb:orders"),
+            )
+        else:
+            await _reply_text(
+                update,
+                f"Could not cancel order {order_id}.",
+                reply_markup=_screen_actions_inline("wb:orders"),
+            )
+    except Exception as e:
+        logger.error("[/cancel] %s", e)
+        await _reply_error(update, "canceling the order")
+
+
+async def cmd_cancelall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+
+        if mode_manager.get_mode() != "production":
+            await _reply_text(
+                update,
+                "Bulk cancellation is only available in production mode.",
+                reply_markup=_screen_actions_inline("wb:orders"),
+            )
+            return
+
+        result = pm_trade.cancel_all_orders()
+        if result:
+            await _reply_text(
+                update,
+                "All open orders canceled.",
+                reply_markup=_screen_actions_inline("wb:orders"),
+            )
+        else:
+            await _reply_text(
+                update,
+                "Could not cancel open orders.",
+                reply_markup=_screen_actions_inline("wb:orders"),
+            )
+    except Exception as e:
+        logger.error("[/cancelall] %s", e)
+        await _reply_error(update, "canceling all open orders")
+
+
+async def cmd_close_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not _authorized(update):
+            return await _deny(update)
+
+        args = context.args
+        if not args:
+            await _reply_text(
+                update,
+                "Usage: /close <market_id> or /close <city> <YYYY-MM-DD>",
+                reply_markup=_screen_actions_inline("wb:positions"),
+            )
+            return
+
+        identifier = args[0]
+        date_str = args[1] if len(args) > 1 else None
+        ok, message = request_manual_close(identifier, date_str)
+        await _reply_text(
+            update,
+            message,
+            reply_markup=_screen_actions_inline("wb:positions"),
+        )
+    except Exception as e:
+        logger.error("[/close] %s", e)
+        await _reply_error(update, "closing the position")

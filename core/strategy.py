@@ -230,6 +230,42 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _take_profit_target(entry_price: float, hours_left: float) -> float | None:
+    """
+    Dynamic take-profit schedule.
+    Short-dated trades still need a profit-taking path; otherwise they can
+    carry large unrealized gains all the way to resolution.
+    """
+    if entry_price <= 0:
+        return None
+    if hours_left < 6:
+        mult = 1.10
+    elif hours_left < 24:
+        mult = 1.25
+    elif hours_left < 48:
+        mult = 1.60
+    else:
+        mult = 2.00
+    return round(entry_price * mult, 4)
+
+
+def _default_stop_price(entry_price: float, hours_left: float) -> float:
+    """
+    Dynamic stop schedule shared across scan/monitor paths.
+    """
+    if hours_left > 48:
+        stop_pct = 0.65
+    elif hours_left > 24:
+        stop_pct = 0.70
+    elif hours_left > 12:
+        stop_pct = 0.75
+    else:
+        stop_pct = 0.80
+
+    abs_stop = entry_price - max(entry_price * (1 - stop_pct), 0.03)
+    return round(max(entry_price * stop_pct, abs_stop), 4)
+
+
 def _avg_price_from_fills(fills: list[dict]) -> float | None:
     total_size = sum(float(fill.get("size", 0.0) or 0.0) for fill in fills)
     if total_size <= 0:
@@ -405,6 +441,95 @@ def _queue_position_close(
     pos["exit_order_price"] = round(float(sell_resp.get("price", current_price)), 4)
     pos["sell_order_id"] = sell_resp.get("order_id")
     return False, True
+
+
+def _resolve_position_market_price(pos: dict, market: dict) -> float | None:
+    current_price = None
+    try:
+        market_id = pos.get("market_id")
+        if market_id:
+            mdata = pm_read.get_market_detail(market_id)
+            if mdata:
+                quote_market = {
+                    "bid": float(mdata.get("bestBid", 0.0) or 0.0),
+                    "ask": float(mdata.get("bestAsk", 0.0) or 0.0),
+                    "price": float(json.loads(mdata.get("outcomePrices", "[0.5,0.5]"))[0]),
+                }
+                best_bid, _, quote_mid = _quotes_for_side_from_outcome(quote_market, _get_position_side(pos))
+                current_price = best_bid if best_bid > 0 else quote_mid
+    except Exception:
+        current_price = None
+
+    if current_price is None:
+        current_price = _position_current_price_from_outcomes(pos, market.get("all_outcomes", []))
+    return current_price
+
+
+def request_manual_close(identifier: str, date_str: str | None = None) -> tuple[bool, str]:
+    """
+    Manually request a position close by market_id or by city/date.
+    Returns (success, user_message).
+    """
+    markets = load_all_markets()
+    state = load_state()
+    target = None
+    identifier_norm = str(identifier or "").strip().lower()
+    date_norm = str(date_str or "").strip()
+
+    for market in markets:
+        pos = market.get("position")
+        if not pos or pos.get("status") != "open":
+            continue
+
+        city_slug = str(market.get("city", "")).strip().lower()
+        city_name = str(market.get("city_name", "")).strip().lower()
+        market_id = str(pos.get("market_id", "")).strip().lower()
+
+        if date_norm:
+            if market.get("date") == date_norm and identifier_norm in {city_slug, city_name}:
+                target = market
+                break
+        elif identifier_norm and identifier_norm == market_id:
+            target = market
+            break
+
+    if target is None:
+        if date_norm:
+            return False, f"No open position found for {identifier} {date_norm}."
+        return False, f"No open position found for identifier {identifier}."
+
+    pos = target["position"]
+    if pos.get("exit_order_status") in ("pending", "partial"):
+        return False, f"Exit already in progress for {target['city_name']} {target['date']}."
+
+    current_price = _resolve_position_market_price(pos, target)
+    if current_price is None or current_price <= 0:
+        return False, f"Could not determine an exit price for {target['city_name']} {target['date']}."
+
+    ts = _utc_now_iso()
+    closed_now, pending_exit = _queue_position_close(pos, target, float(current_price), "manual_close", ts)
+    save_market(target)
+
+    if closed_now:
+        proceeds = round(float(pos.get("shares", 0.0) or 0.0) * float(pos.get("exit_price", current_price) or current_price), 2)
+        state["balance"] = round(float(state.get("balance", 0.0) or 0.0) + proceeds, 2)
+        state["peak_balance"] = max(float(state.get("peak_balance", state["balance"]) or state["balance"]), float(state["balance"]))
+        save_state(state)
+        pnl = float(pos.get("pnl", 0.0) or 0.0)
+        return True, (
+            f"Closed {target['city_name']} {target['date']} at ${float(pos.get('exit_price', current_price)):.3f}. "
+            f"PnL: {pnl:+.2f}"
+        )
+
+    if pending_exit:
+        order_id = str(pos.get("sell_order_id", "") or "")
+        exit_price = float(pos.get("exit_order_price", current_price) or current_price)
+        suffix = f" Order {order_id}." if order_id else "."
+        return True, (
+            f"Exit queued for {target['city_name']} {target['date']} at about ${exit_price:.3f}.{suffix}"
+        )
+
+    return False, f"Could not queue exit for {target['city_name']} {target['date']}."
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1454,15 +1579,12 @@ def monitor_positions() -> int:
             continue
 
         entry = pos["entry_price"]
-        stop = pos.get("stop_price", entry * 0.80)
+        stop = float(pos.get("stop_price", _default_stop_price(entry, hours_left)) or _default_stop_price(entry, hours_left))
         city_name = LOCATIONS.get(mkt["city"], {}).get("name", mkt["city"])
         end_date = mkt.get("event_end_date", "")
         hours_left = pm_read.hours_to_resolution(end_date) if end_date else 999.0
 
-        take_profit = None
-        if hours_left >= 24:
-            mult = 1.60 if hours_left < 48 else 2.00
-            take_profit = entry * mult
+        take_profit = _take_profit_target(entry, hours_left)
 
         forecast_shift = False
         if pos.get("forecast_at_entry"):
