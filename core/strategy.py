@@ -628,7 +628,15 @@ def scan_and_update() -> tuple[int, int, int]:
                                         side="BUY",
                                     )
                                     if resp:
-                                        best_signal["clob_order_id"] = resp.get("orderID") or resp.get("id")
+                                        order_id = resp.get("orderID") or resp.get("id")
+                                        best_signal["clob_order_id"] = order_id
+                                        best_signal["token_id"] = token_id
+                                        best_signal["order_status"] = "pending"
+                                        best_signal["order_placed_at"] = now.isoformat()
+                                        logger.info(
+                                            "[TRADE] BUY placed order_id=%s token=%s shares=%.2f @ $%.3f",
+                                            order_id, token_id, best_signal["shares"], best_signal["entry_price"]
+                                        )
                                     else:
                                         logger.error("[TRADE] Order returned None — skipping")
                                         skip = True
@@ -749,12 +757,206 @@ def scan_and_update() -> tuple[int, int, int]:
 
 
 # ═══════════════════════════════════════════════════════════
+# PRODUCTION HELPERS
+# ═══════════════════════════════════════════════════════════
+
+_CLOB_RECONCILED = False  # Run once per process startup
+
+
+def _reconcile_clob_on_startup():
+    """
+    On first run in production, compare internal open positions vs actual CLOB.
+    Positions whose GTC order is no longer open and not filled → ghost_cleanup.
+    """
+    global _CLOB_RECONCILED
+    if _CLOB_RECONCILED or not _is_production():
+        _CLOB_RECONCILED = True
+        return
+    _CLOB_RECONCILED = True
+
+    try:
+        open_clob_ids = {
+            str(o.get("id") or o.get("orderID", ""))
+            for o in pm_trade.get_open_orders()
+        }
+        markets = load_all_markets()
+        cleaned = 0
+        for mkt in markets:
+            pos = mkt.get("position")
+            if not pos or pos.get("status") != "open":
+                continue
+            order_id = pos.get("clob_order_id")
+            if not order_id:
+                continue
+            if pos.get("order_status") in ("filled", None):
+                continue
+            if order_id not in open_clob_ids:
+                fill_status = pm_trade.get_order_status(order_id)
+                if fill_status == "matched":
+                    pos["order_status"] = "filled"
+                    logger.info("[RECONCILE] order %s confirmed filled", order_id)
+                else:
+                    pos["status"] = "closed"
+                    pos["close_reason"] = "ghost_cleanup"
+                    pos["pnl"] = 0.0
+                    pos["closed_at"] = datetime.now(timezone.utc).isoformat()
+                    mkt["status"] = "resolved"
+                    logger.warning("[RECONCILE] order %s vanished — cleaned ghost", order_id)
+                    cleaned += 1
+                save_market(mkt)
+        if cleaned:
+            _notify(f"🔧 [RECONCILE] {cleaned} ghost order(s) cleaned on startup")
+    except Exception as e:
+        logger.error("[RECONCILE] Failed: %s", e)
+
+
+def _place_sell(pos: dict, current_price: float, city_name: str, date: str) -> bool:
+    """
+    Place a SELL limit order in production to close a position.
+    In simulation: no-op, returns True.
+    Returns True if successful (or simulation), False on hard failure.
+    """
+    if not _is_production():
+        return True
+
+    token_id = pos.get("token_id")
+    shares = pos.get("shares", 0.0)
+
+    if not token_id:
+        logger.warning("[SELL] No token_id stored for %s %s — cannot SELL", city_name, date)
+        _notify(
+            f"⚠️ [PROD] No token_id for {city_name} {date} — "
+            f"position marked closed internally but NO SELL ORDER was placed. "
+            f"Please close manually on Polymarket!"
+        )
+        return False
+
+    if shares < 0.01:
+        logger.info("[SELL] Shares %.4f too small — skipping SELL", shares)
+        return True
+
+    # Sell slightly below bestBid to get immediate fill
+    sell_price = max(0.01, round(current_price - 0.01, 2))
+
+    try:
+        resp = pm_trade.place_limit_order(
+            token_id=token_id,
+            price=sell_price,
+            size=shares,
+            side="SELL",
+        )
+        if resp:
+            sell_id = resp.get("orderID") or resp.get("id")
+            pos["sell_order_id"] = sell_id
+            logger.info("[SELL] Order placed id=%s @ $%.3f × %.2f shares", sell_id, sell_price, shares)
+            return True
+        else:
+            logger.error("[SELL] Order returned None for %s %s", city_name, date)
+            _notify(f"⚠️ [SELL FAILED] {city_name} {date} — SELL returned None. Close manually on Polymarket!")
+            return False
+    except Exception as e:
+        logger.error("[SELL] Order failed for %s %s: %s", city_name, date, e)
+        _notify(f"⚠️ [SELL FAILED] {city_name} {date}: {e}\nClose manually on Polymarket!")
+        return False
+
+
+def _check_pending_fills(markets: list, balance: float) -> tuple[float, int]:
+    """
+    For production positions with order_status='pending':
+      - Check CLOB fill status
+      - If filled → mark as 'filled'
+      - If cancelled externally → refund and close
+      - If open after 30 min → cancel & refund
+    In simulation mode: instantly marks all pending as 'filled'.
+    Returns (updated_balance, n_cancelled).
+    """
+    if not _is_production():
+        for mkt in markets:
+            pos = mkt.get("position")
+            if pos and pos.get("order_status") == "pending":
+                pos["order_status"] = "filled"
+                save_market(mkt)
+        return balance, 0
+
+    FILL_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
+    cancelled = 0
+
+    for mkt in markets:
+        pos = mkt.get("position")
+        if not pos or pos.get("order_status") != "pending":
+            continue
+
+        order_id = pos.get("clob_order_id")
+        placed_at_str = pos.get("order_placed_at", "")
+
+        if not order_id:
+            pos["order_status"] = "filled"
+            save_market(mkt)
+            continue
+
+        try:
+            placed_at = datetime.fromisoformat(placed_at_str.replace("Z", "+00:00"))
+            age_seconds = (datetime.now(timezone.utc) - placed_at).total_seconds()
+        except Exception:
+            age_seconds = 0
+
+        fill_status = pm_trade.get_order_status(order_id)
+
+        if fill_status == "matched":
+            pos["order_status"] = "filled"
+            logger.info("[FILL] Order %s confirmed filled", order_id)
+            save_market(mkt)
+
+        elif fill_status == "cancelled":
+            refund = pos.get("cost", 0)
+            balance += refund
+            pos["status"] = "closed"
+            pos["order_status"] = "cancelled"
+            pos["close_reason"] = "order_cancelled"
+            pos["pnl"] = 0.0
+            pos["closed_at"] = datetime.now(timezone.utc).isoformat()
+            mkt["status"] = "resolved"
+            logger.warning("[FILL] Order %s cancelled externally — refunded $%.2f", order_id, refund)
+            _notify(f"⚠️ [ORDER CANCELLED] {mkt['city_name']} {mkt['date']} — refunded ${refund:.2f}")
+            save_market(mkt)
+            cancelled += 1
+
+        elif age_seconds > FILL_TIMEOUT_SECONDS:
+            pm_trade.cancel_order(order_id)
+            refund = pos.get("cost", 0)
+            balance += refund
+            pos["status"] = "closed"
+            pos["order_status"] = "timeout_cancelled"
+            pos["close_reason"] = "fill_timeout"
+            pos["pnl"] = 0.0
+            pos["closed_at"] = datetime.now(timezone.utc).isoformat()
+            mkt["status"] = "resolved"
+            logger.warning("[FILL] Order %s timed out (%.0fs) — cancelled, refunded $%.2f", order_id, age_seconds, refund)
+            _notify(
+                f"⏱️ [FILL TIMEOUT] {mkt['city_name']} {mkt['date']} — "
+                f"BUY order unfilled after 30min, cancelled. Refunded ${refund:.2f}"
+            )
+            save_market(mkt)
+            cancelled += 1
+
+    return balance, cancelled
+
+
+# ═══════════════════════════════════════════════════════════
 # QUICK POSITION MONITOR
 # ═══════════════════════════════════════════════════════════
 
 def monitor_positions() -> int:
-    """Quick stop/take-profit check on open positions (runs between full scans)."""
+    """
+    Quick stop/take-profit check on open positions (runs between full scans).
+    Production: places real SELL orders; verifies GTC BUY fill status.
+    Simulation: purely internal state updates.
+    """
     settings.reload_risk_config()
+
+    # Run once-per-startup CLOB reconciliation
+    _reconcile_clob_on_startup()
+
     markets = load_all_markets()
     open_pos = [m for m in markets if m.get("position") and m["position"].get("status") == "open"]
     if not open_pos:
@@ -764,11 +966,24 @@ def monitor_positions() -> int:
     balance = state["balance"]
     closed = 0
 
+    # ── GTC fill verification / pending cleanup ────────────
+    balance, fill_cancelled = _check_pending_fills(open_pos, balance)
+    closed += fill_cancelled
+    if fill_cancelled:
+        # Reload after cleanup to avoid processing stale data
+        markets = load_all_markets()
+        open_pos = [m for m in markets if m.get("position") and m["position"].get("status") == "open"]
+
     for mkt in open_pos:
         pos = mkt["position"]
+
+        # Skip positions still awaiting fill confirmation
+        if pos.get("order_status") == "pending":
+            continue
+
         mid = pos["market_id"]
 
-        # Fetch real bestBid
+        # Fetch real bestBid from Polymarket
         current_price = None
         try:
             mdata = pm_read.get_market_detail(mid)
@@ -790,22 +1005,17 @@ def monitor_positions() -> int:
         entry = pos["entry_price"]
         stop = pos.get("stop_price", entry * 0.80)
         city_name = LOCATIONS.get(mkt["city"], {}).get("name", mkt["city"])
-
         end_date = mkt.get("event_end_date", "")
         hours_left = pm_read.hours_to_resolution(end_date) if end_date else 999.0
 
-        # Take-profit thresholds: close when price moved UP enough from entry
+        # Take-profit: close when price appreciated enough above entry
         entry_price = pos["entry_price"]
-        if hours_left < 24:
-            take_profit = None  # Near resolution: let it resolve naturally
-        elif hours_left < 48:
-            take_profit_mult = 1.60  # 60% gain from entry
-        else:
-            take_profit_mult = 2.00  # 100% gain from entry (double)
-        take_profit = entry_price * take_profit_mult if hours_left >= 24 else None
+        take_profit = None
+        if hours_left >= 24:
+            mult = 1.60 if hours_left < 48 else 2.00
+            take_profit = entry_price * mult
 
-        # FORECAST SHIFT: if forecast moved significantly away, close position
-        # (replaces rigid stop-loss)
+        # Forecast shift closes (only when very near resolution)
         forecast_shift = False
         if pos.get("forecast_at_entry"):
             for snap_record in mkt.get("forecast_snapshots", []):
@@ -813,47 +1023,48 @@ def monitor_positions() -> int:
                     forecast_shift = True
                     break
 
-        # Trailing
+        # Trailing stop: move stop to breakeven after +20%
         if current_price >= entry * 1.20 and stop < entry:
             pos["stop_price"] = entry
             pos["trailing_activated"] = True
-            _notify(f"🔒 [TRAILING] {city_name} {mkt['date']} — stop → breakeven ${entry:.3f}")
+            _notify(f"🔒 [TRAILING] {city_name} {mkt['date']} — stop moved to breakeven ${entry:.3f}")
 
         take_triggered = take_profit is not None and current_price >= take_profit
         stop_triggered = current_price <= stop
-        forecast_close = forecast_shift and hours_left < 6  # only close on shift if close to event
+        forecast_close = forecast_shift and hours_left < 6
 
         if take_triggered or stop_triggered or forecast_close:
+            # ── SELL in production (no-op in simulation) ──
+            sell_ok = _place_sell(pos, current_price, city_name, mkt["date"])
+
             pnl = round((current_price - entry) * pos["shares"], 2)
             balance += pos["cost"] + pnl
             pos["closed_at"] = datetime.now(timezone.utc).isoformat()
+
             if take_triggered:
                 pos["close_reason"] = "take_profit"
-                reason = "TAKE"
-                emoji = "💰"
+                reason, emoji = "TAKE", "💰"
             elif forecast_close:
                 pos["close_reason"] = "forecast_shift_close"
-                reason = "FCAST"
-                emoji = "🔄"
+                reason, emoji = "FCAST", "🔄"
             elif current_price < entry:
                 pos["close_reason"] = "stop_loss"
-                reason = "STOP"
-                emoji = "🛑"
+                reason, emoji = "STOP", "🛑"
             else:
                 pos["close_reason"] = "trailing_stop"
-                reason = "TRAILING"
-                emoji = "🔒"
+                reason, emoji = "TRAILING", "🔒"
+
             pos["exit_price"] = current_price
             pos["pnl"] = pnl
             pos["status"] = "closed"
             closed += 1
 
-            msg = (
+            sell_warn = "" if sell_ok else "\n⚠️ SELL order failed — close manually on Polymarket!"
+            _notify(
                 f"{emoji} [{reason}] {city_name} {mkt['date']}\n"
-                f"   entry ${entry:.3f} → exit ${current_price:.3f} | {hours_left:.0f}h left\n"
-                f"   PnL: {'+' if pnl >= 0 else ''}{pnl:.2f}"
+                f"   ${entry:.3f} → ${current_price:.3f} | {hours_left:.0f}h left\n"
+                f"   PnL: {'+' if pnl >= 0 else ''}{pnl:.2f}{sell_warn}"
             )
-            _notify(msg)
             save_market(mkt)
 
     if closed:
@@ -861,3 +1072,4 @@ def monitor_positions() -> int:
         save_state(state)
 
     return closed
+

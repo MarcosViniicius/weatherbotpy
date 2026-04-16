@@ -285,6 +285,44 @@ def get_open_orders() -> list:
         return []
 
 
+def get_order_status(order_id: str) -> str | None:
+    """
+    Check the fill status of a specific CLOB order.
+
+    Returns:
+        "open"      — order exists and is unfilled / partially filled
+        "matched"   — order fully filled
+        "cancelled" — order was cancelled
+        None        — could not determine (API error or order not found)
+    """
+    client = _get_client()
+    if client is None:
+        return None
+    try:
+        # Try getting order by ID directly
+        if hasattr(client, "get_order"):
+            order = client.get_order(order_id)
+            if order:
+                status = str(order.get("status", "")).lower()
+                if status in ("matched", "filled"):
+                    return "matched"
+                if status in ("cancelled", "canceled"):
+                    return "cancelled"
+                return "open"
+
+        # Fallback: scan open orders list
+        open_orders = get_open_orders()
+        open_ids = {str(o.get("id") or o.get("orderID", "")) for o in open_orders}
+        if order_id in open_ids:
+            return "open"
+
+        # Not in open orders → assume filled (most common case after GTC execution)
+        return "matched"
+    except Exception as e:
+        logger.warning("[CLOB] get_order_status(%s) failed: %s", order_id, e)
+        return None
+
+
 def get_trades() -> list:
     """Get recent trade history."""
     client = _get_client()
