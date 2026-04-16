@@ -13,10 +13,66 @@ from config.locations import LOCATIONS
 logger = logging.getLogger("weatherbet.state")
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_market_record(market: dict) -> tuple[dict, bool]:
+    """
+    Keep top-level market bookkeeping aligned with the nested position payload.
+
+    Older files can drift into states such as:
+    - market.status == "open" while position.status == "closed"
+    - market.pnl missing even though position.pnl exists
+    - resolved outcome missing for resolved positions
+    """
+    changed = False
+    pos = market.get("position")
+    status = str(market.get("status") or "open")
+
+    if pos:
+        pos_status = str(pos.get("status") or "open")
+        pos_pnl = pos.get("pnl")
+        close_reason = str(pos.get("close_reason") or "")
+        is_resolved = close_reason == "resolved" or status == "resolved"
+
+        if pos_status == "open" and status != "open":
+            market["status"] = "open"
+            changed = True
+
+        if pos_status == "closed":
+            desired_status = "resolved" if is_resolved else "closed"
+            if status != desired_status:
+                market["status"] = desired_status
+                changed = True
+
+            if pos_pnl is not None and market.get("pnl") != pos_pnl:
+                market["pnl"] = pos_pnl
+                changed = True
+
+            if desired_status == "resolved":
+                inferred_outcome = market.get("resolved_outcome")
+                if not inferred_outcome and pos_pnl is not None:
+                    inferred_outcome = "win" if _safe_float(pos_pnl) > 0 else "loss"
+                if inferred_outcome and market.get("resolved_outcome") != inferred_outcome:
+                    market["resolved_outcome"] = inferred_outcome
+                    changed = True
+
+    return market, changed
+
+
 def _has_open_positions() -> bool:
     for f in settings.MARKETS_DIR.glob("*.json"):
         try:
             m = json.loads(f.read_text(encoding="utf-8"))
+            m, changed = _normalize_market_record(m)
+            if changed:
+                save_market(m)
             pos = m.get("position")
             if pos and pos.get("status") == "open":
                 return True
@@ -96,6 +152,63 @@ def _sync_state_balance_from_wallet(state: dict) -> tuple[dict, bool]:
     return state, changed
 
 
+def _sync_state_counters_from_markets(state: dict) -> tuple[dict, bool]:
+    """
+    Rebuild summary counters from market files so dashboard/Telegram metrics remain
+    correct even if state.json drifts or some older market files were persisted
+    with stale top-level status fields.
+    """
+    entry_count = 0
+    wins = 0
+    losses = 0
+
+    for market in load_all_markets():
+        pos = market.get("position")
+        if not pos:
+            continue
+
+        entry_count += 1
+        if pos.get("status") != "closed":
+            continue
+
+        is_resolved = market.get("status") == "resolved" or pos.get("close_reason") == "resolved"
+        if not is_resolved:
+            continue
+
+        outcome = market.get("resolved_outcome")
+        if outcome not in ("win", "loss"):
+            pnl_value = pos.get("pnl", market.get("pnl"))
+            if pnl_value is None:
+                continue
+            outcome = "win" if _safe_float(pnl_value) > 0 else "loss"
+
+        if outcome == "win":
+            wins += 1
+        else:
+            losses += 1
+
+    changed = False
+    if state.get("total_trades") != entry_count:
+        state["total_trades"] = entry_count
+        changed = True
+    if state.get("wins") != wins:
+        state["wins"] = wins
+        changed = True
+    if state.get("losses") != losses:
+        state["losses"] = losses
+        changed = True
+
+    peak = _safe_float(state.get("peak_balance"), _safe_float(state.get("balance"), settings.BALANCE))
+    current_balance = _safe_float(state.get("balance"), settings.BALANCE)
+    starting_balance = _safe_float(state.get("starting_balance"), settings.BALANCE)
+    new_peak = max(peak, current_balance, starting_balance)
+    if peak != new_peak:
+        state["peak_balance"] = new_peak
+        changed = True
+
+    return state, changed
+
+
 # ═══════════════════════════════════════════════════════════
 # GLOBAL STATE (balance, win/loss counters)
 # ═══════════════════════════════════════════════════════════
@@ -107,7 +220,8 @@ def load_state() -> dict:
             state = json.loads(settings.STATE_FILE.read_text(encoding="utf-8"))
             state, wallet_sync_changed = _sync_state_balance_from_wallet(state)
             state, changed = _sync_state_balance_if_idle(state)
-            if changed or wallet_sync_changed:
+            state, counters_changed = _sync_state_counters_from_markets(state)
+            if changed or wallet_sync_changed or counters_changed:
                 save_state(state)
             return state
         except Exception as e:
@@ -121,6 +235,7 @@ def load_state() -> dict:
         "peak_balance":     settings.BALANCE,
     }
     state, _ = _sync_state_balance_from_wallet(state)
+    state, _ = _sync_state_counters_from_markets(state)
     return state
 
 
@@ -143,7 +258,11 @@ def load_market(city_slug: str, date_str: str) -> dict | None:
     p = market_path(city_slug, date_str)
     if p.exists():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            market = json.loads(p.read_text(encoding="utf-8"))
+            market, changed = _normalize_market_record(market)
+            if changed:
+                save_market(market)
+            return market
         except Exception:
             return None
     return None
@@ -161,7 +280,11 @@ def load_all_markets() -> list[dict]:
     markets = []
     for f in settings.MARKETS_DIR.glob("*.json"):
         try:
-            markets.append(json.loads(f.read_text(encoding="utf-8")))
+            market = json.loads(f.read_text(encoding="utf-8"))
+            market, changed = _normalize_market_record(market)
+            if changed:
+                save_market(market)
+            markets.append(market)
         except Exception:
             pass
     return markets

@@ -73,6 +73,20 @@ def _execution_metrics(pos: dict) -> dict:
     }
 
 
+def _trade_outcome(market: dict, pos: dict) -> str | None:
+    if pos.get("status") != "closed":
+        return None
+    if market.get("status") == "resolved" or pos.get("close_reason") == "resolved":
+        outcome = market.get("resolved_outcome")
+        if outcome in ("win", "loss"):
+            return outcome
+        pnl_value = pos.get("pnl", market.get("pnl"))
+        if pnl_value is None:
+            return None
+        return "win" if _safe_float(pnl_value) > 0 else "loss"
+    return None
+
+
 # ═══════════════════════════════════════════════════════════
 # AUTHENTICATION
 # ═══════════════════════════════════════════════════════════
@@ -130,6 +144,21 @@ def _build_api_data() -> dict:
 
     # Open positions
     positions = {}
+    performance = {
+        "entry_count": 0,
+        "closed_count": 0,
+        "resolved_count": 0,
+        "wins": 0,
+        "losses": 0,
+        "open_cost_basis": 0.0,
+        "open_market_value": 0.0,
+        "unrealized_pnl": 0.0,
+        "realized_pnl": 0.0,
+        "cash_balance": _safe_float(state.get("balance"), 0.0),
+        "equity_balance": 0.0,
+        "total_pnl": 0.0,
+        "return_pct": 0.0,
+    }
     execution_rollup = {
         "entries": 0,
         "exits": 0,
@@ -145,6 +174,8 @@ def _build_api_data() -> dict:
         if not pos:
             continue
 
+        performance["entry_count"] += 1
+
         exec_metrics = _execution_metrics(pos)
         execution_rollup["entries"] += 1
         execution_rollup["avg_entry_slippage_bps"] += exec_metrics["entry_slippage_bps"]
@@ -157,6 +188,15 @@ def _build_api_data() -> dict:
             execution_rollup["avg_exit_fill_rate"] += exec_metrics["exit_fill_rate"]
 
         if pos.get("status") != "open":
+            performance["closed_count"] += 1
+            performance["realized_pnl"] += _safe_float(pos.get("pnl"))
+            outcome = _trade_outcome(m, pos)
+            if outcome == "win":
+                performance["wins"] += 1
+                performance["resolved_count"] += 1
+            elif outcome == "loss":
+                performance["losses"] += 1
+                performance["resolved_count"] += 1
             continue
 
         mid = pos.get("market_id", m["city"] + "_" + m["date"])
@@ -172,6 +212,10 @@ def _build_api_data() -> dict:
                 break
 
         unrealized = round((current_price - pos["entry_price"]) * pos["shares"], 2)
+        market_value = round(current_price * pos["shares"], 2)
+        performance["open_cost_basis"] += _safe_float(pos.get("cost"))
+        performance["open_market_value"] += market_value
+        performance["unrealized_pnl"] += unrealized
 
         end_date = m.get("event_end_date", "")
         hrs = hours_to_resolution(end_date) if end_date else 0
@@ -192,6 +236,7 @@ def _build_api_data() -> dict:
             "cost": pos["cost"],
             "shares": pos["shares"],
             "pnl": unrealized,
+            "market_value": market_value,
             "ev": pos.get("ev", 0),
             "ev_after_costs": ev_after_costs,
             "edge": pos.get("edge", 0),
@@ -213,6 +258,7 @@ def _build_api_data() -> dict:
         pos = m.get("position")
         if not pos:
             continue
+        exec_metrics = _execution_metrics(pos)
 
         unit_sym = "F" if m.get("unit") == "F" else "C"
         bl = pos.get("bucket_low", 0)
@@ -248,6 +294,7 @@ def _build_api_data() -> dict:
                 "pnl": pos["pnl"],
                 "close_reason": pos.get("close_reason", ""),
                 "closed_at": pos.get("closed_at", ""),
+                "outcome": _trade_outcome(m, pos),
                 "ev": pos.get("ev", 0),
                 "edge": pos.get("edge", 0),
                 "kelly_pct": pos.get("kelly", 0),
@@ -273,16 +320,30 @@ def _build_api_data() -> dict:
         )
     execution_rollup["expected_ev_dollars"] = round(execution_rollup["expected_ev_dollars"], 2)
     execution_rollup["realized_pnl"] = round(execution_rollup["realized_pnl"], 2)
+    performance["open_cost_basis"] = round(performance["open_cost_basis"], 2)
+    performance["open_market_value"] = round(performance["open_market_value"], 2)
+    performance["unrealized_pnl"] = round(performance["unrealized_pnl"], 2)
+    performance["realized_pnl"] = round(performance["realized_pnl"], 2)
+    performance["equity_balance"] = round(
+        performance["cash_balance"] + performance["open_market_value"], 2
+    )
+    starting_balance = _safe_float(state.get("starting_balance"), settings.BALANCE)
+    performance["total_pnl"] = round(performance["equity_balance"] - starting_balance, 2)
+    performance["return_pct"] = round(
+        (performance["total_pnl"] / starting_balance * 100) if starting_balance > 0 else 0.0,
+        2,
+    )
 
     return {
         "balance": state["balance"],
-        "starting_balance": state.get("starting_balance", settings.BALANCE),
-        "total_trades": state.get("total_trades", 0),
-        "wins": state.get("wins", 0),
-        "losses": state.get("losses", 0),
+        "starting_balance": starting_balance,
+        "total_trades": performance["entry_count"],
+        "wins": performance["wins"],
+        "losses": performance["losses"],
         "peak_balance": state.get("peak_balance", state["balance"]),
         "positions": positions,
         "trades": trades,
+        "performance": performance,
         "calibration": compute_calibration_report(),
         "execution": execution_rollup,
         "mode": mode,

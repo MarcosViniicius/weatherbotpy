@@ -451,10 +451,13 @@ function renderTrades(trades) {
   const recent = [...trades].reverse().slice(0, 20);
   el.innerHTML = recent.map(t => {
     const isEntry = t.type === 'entry';
-    const isWin = t.type === 'exit' && (t.pnl || 0) > 0;
-    const isStop = t.type === 'exit' && (t.close_reason || '').includes('stop');
-    const cls = isEntry ? 'buy' : isStop ? 'stop' : isWin ? 'win' : 'loss';
-    const label = isEntry ? 'BUY' : isStop ? 'STOP' : isWin ? 'WIN' : 'LOSS';
+    const reason = (t.close_reason || '').toLowerCase();
+    const outcome = t.outcome || ((t.pnl || 0) > 0 ? 'win' : 'loss');
+    const isWin = t.type === 'exit' && outcome === 'win' && reason === 'resolved';
+    const isStop = t.type === 'exit' && reason.includes('stop');
+    const isClose = t.type === 'exit' && !isStop && reason && reason !== 'resolved';
+    const cls = isEntry ? 'buy' : isStop ? 'stop' : isClose ? 'stop' : isWin ? 'win' : 'loss';
+    const label = isEntry ? 'BUY' : isStop ? 'STOP' : isClose ? 'CLOSE' : isWin ? 'WIN' : 'LOSS';
     const amtStr = isEntry ? `-$${(t.cost || 0).toFixed(2)}` : (t.pnl || 0) >= 0 ? `+$${(t.pnl || 0).toFixed(2)}` : `-$${Math.abs(t.pnl || 0).toFixed(2)}`;
     const amtCls = isEntry ? 'neg' : (t.pnl || 0) >= 0 ? 'pos' : 'neg';
     const time = (t.opened_at || t.closed_at || '').substr(11, 5) || '—';
@@ -602,9 +605,10 @@ async function loadData() {
 
     const bal = d.balance || 0;
     const start = d.starting_balance || 20;
-    const wins = d.wins || 0;
-    const losses = d.losses || 0;
-    const totalTrades = d.total_trades || 0;
+    const perf = d.performance || {};
+    const wins = d.wins || perf.wins || 0;
+    const losses = d.losses || perf.losses || 0;
+    const totalTrades = d.total_trades || perf.entry_count || 0;
     const positions = d.positions || {};
     const trades = d.trades || [];
     const cal = d.calibration || {};
@@ -613,9 +617,9 @@ async function loadData() {
     const peak = d.peak_balance || bal;
     const mode = d.mode || 'simulation';
 
-    const openValue = Object.values(positions).reduce((s, p) => s + (p.pnl || 0), 0);
-    const pnl = (bal - start) + openValue;
-    const pct = pnl / start * 100;
+    const pnl = perf.total_pnl != null ? perf.total_pnl : (bal - start);
+    const pct = perf.return_pct != null ? perf.return_pct : (start > 0 ? (pnl / start * 100) : 0);
+    const equity = perf.equity_balance != null ? perf.equity_balance : bal;
 
     // Mode badge
     const modeBadge = document.getElementById('mode-badge');
@@ -638,7 +642,7 @@ async function loadData() {
     document.getElementById('ts').textContent = 'Updated: ' + now();
     document.getElementById('s-bal').textContent = '$' + bal.toFixed(2);
     const pnlEl = document.getElementById('s-pnl');
-    pnlEl.textContent = (pnl >= 0 ? '+' : '') + ' $' + Math.abs(pnl).toFixed(2);
+    pnlEl.textContent = (pnl >= 0 ? '+' : '-') + '$' + Math.abs(pnl).toFixed(2);
     pnlEl.className = 'stat-val' + (pnl < 0 ? ' red' : '');
     document.getElementById('s-pct').textContent = (pct >= 0 ? '+' : '') + pct.toFixed(1) + '% return';
     document.getElementById('s-open').textContent = Object.keys(positions).length;
@@ -653,9 +657,9 @@ async function loadData() {
     document.getElementById('s-calacc').title = `Entry slip ${fmt2(execution.avg_entry_slippage_bps || 0)}bps | Fill ${(100 * (execution.avg_fill_rate || 0)).toFixed(0)}% | ExpEV $${(execution.expected_ev_dollars || 0).toFixed(2)}`;
 
     // Chart
-    if (prevBal !== null && Math.abs(bal - prevBal) > 0.05) spawnDelta(bal - prevBal);
-    prevBal = bal;
-    balHistory.push(parseFloat(bal.toFixed(2)));
+    if (prevBal !== null && Math.abs(equity - prevBal) > 0.05) spawnDelta(equity - prevBal);
+    prevBal = equity;
+    balHistory.push(parseFloat(equity.toFixed(2)));
     timeLabels.push(now());
     if (balHistory.length > 80) { balHistory.shift(); timeLabels.shift(); }
     chart.data.labels = [...timeLabels];
