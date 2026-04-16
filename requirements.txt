@@ -2,3 +2,5 @@ requests>=2.31
 python-telegram-bot>=21.0
 python-dotenv>=1.0
 py-clob-client>=0.34
+tomli>=2.0; python_version < "3.11"
+tzdata>=2024.1

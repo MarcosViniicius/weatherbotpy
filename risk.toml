@@ -1,16 +1,24 @@
 # WeatherBet risk configuration
 # Updated via Telegram /setrisk or manual edit
 
-[risk]
+[account]
 balance = 20.0
 max_bet = 2.0
-min_edge = 0.05
-max_price = 0.60
-min_volume = 200
-min_hours = 2.0
-max_hours = 72.0
-kelly_fraction = 0.25
-max_slippage = 0.02
-scan_interval = 900
+
+[risk]
+min_edge = 0.10          # Minimum real edge after costs (10%)
+max_price = 0.50         # Only trade uncertain events (< 50c = market is genuinely split)
+kelly_fraction = 0.25    # Conservative Kelly — 25% of full Kelly
+
+[market_filters]
+min_volume = 500         # Requires meaningful liquidity
+min_hours = 2.0          # Don't enter if resolving in < 2h (slippage too high)
+max_hours = 72.0         # Max 3-day forecast horizon
+max_slippage = 0.02      # Strict slippage cap — 2%
+
+[execution]
+scan_interval = 300      # Scan every 5 minutes — fast enough to catch ineficiencies
+relax_stage = 0
+
+[model]
 calibration_min = 50
-relax_stage = 1

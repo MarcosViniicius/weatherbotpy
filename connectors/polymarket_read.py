@@ -186,9 +186,11 @@ def check_market_resolved(market_id: str) -> bool | None:
             return None
         prices = json.loads(data.get("outcomePrices", "[0.5,0.5]"))
         yes_price = float(prices[0])
-        if yes_price >= 0.95:
+        # Use 90%/10% thresholds — Polymarket oracle can settle between 85-95%
+        # during the resolution window. Using 95%/5% misses many legitimate resolutions.
+        if yes_price >= 0.90:
             return True
-        elif yes_price <= 0.05:
+        elif yes_price <= 0.10:
             return False
         return None
     except Exception as e:

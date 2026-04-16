@@ -176,12 +176,14 @@ async def _scan_loop(notify_func):
 
                 from core.state import load_state
                 state = load_state()
-                summary = (
-                    f"📊 Scan complete — {now_str}\n"
-                    f"Balance: ${state['balance']:,.2f}\n"
-                    f"New: {new_pos} | Closed: {closed} | Resolved: {resolved}"
-                )
-                await notify_func(summary)
+                # Only notify when something actually happened — avoid scan noise
+                if new_pos or closed or resolved:
+                    summary = (
+                        f"📊 Scan — {now_str}\n"
+                        f"Balance: ${state['balance']:,.2f}\n"
+                        f"New: {new_pos} | Closed: {closed} | Resolved: {resolved}"
+                    )
+                    await notify_func(summary)
                 consecutive_scan_failures = 0
                 next_scan_allowed_at = 0.0
                 last_full_scan = asyncio.get_event_loop().time()
@@ -239,7 +241,9 @@ async def _scan_loop(notify_func):
             except Exception as e:
                 logger.error("[NOTIFY] Periodic update failed: %s", e)
 
-        await asyncio.sleep(settings.MONITOR_INTERVAL)
+        # Sleep until next event: whichever comes first — next scan or next monitor
+        sleep_secs = min(settings.MONITOR_INTERVAL, settings.SCAN_INTERVAL)
+        await asyncio.sleep(sleep_secs)
 
 
 def start_scheduler(notify_func) -> asyncio.Task:

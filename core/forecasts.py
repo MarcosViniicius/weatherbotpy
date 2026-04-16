@@ -3,6 +3,7 @@ core/forecasts.py — Weather forecast fetchers (ECMWF, HRRR, METAR, Visual Cros
 All HTTP calls use retry_with_backoff and circuit breakers.
 """
 
+import time
 import logging
 import requests
 from datetime import datetime, timezone, timedelta
@@ -12,6 +13,29 @@ from config.settings import VC_KEY
 from connectors.resilience import retry_with_backoff, openmeteo_cb, metar_cb, get_http_session
 
 logger = logging.getLogger("weatherbet.forecasts")
+
+# ═══════════════════════════════════════════════════════════
+# IN-MEMORY FORECAST CACHE
+# ═══════════════════════════════════════════════════════════
+_CACHE_TTL = 300  # 5 minutes in seconds
+_forecast_cache: dict[str, tuple[float, dict]] = {}  # key -> (timestamp, data)
+
+
+def _cache_get(key: str) -> dict | None:
+    """Return cached value if within TTL, else None."""
+    entry = _forecast_cache.get(key)
+    if entry and (time.monotonic() - entry[0]) < _CACHE_TTL:
+        return entry[1]
+    return None
+
+
+def _cache_set(key: str, value: dict) -> None:
+    _forecast_cache[key] = (time.monotonic(), value)
+
+
+def clear_forecast_cache():
+    """Force clear (used in tests or after config changes)."""
+    _forecast_cache.clear()
 
 _weather_session = get_http_session("weather")
 _metar_session = get_http_session("metar")
@@ -210,8 +234,19 @@ def get_actual_temp(city_slug: str, date_str: str) -> float | None:
 # ═══════════════════════════════════════════════════════════
 
 def take_forecast_snapshot(city_slug: str, dates: list[str]) -> dict:
-    """Fetch forecasts from all sources and return a snapshot per date."""
+    """
+    Fetch forecasts from all sources and return a snapshot per date.
+    v3.2: In-memory cache (5 min TTL), METAR primary for D+0,
+    ensemble weighted average for best estimate.
+    """
     now_str = datetime.now(timezone.utc).isoformat()
+
+    # Cache key includes city + first date of window
+    cache_key = f"{city_slug}_{dates[0] if dates else 'none'}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        logger.debug("[CACHE] Hit for %s", cache_key)
+        return cached
 
     try:
         ecmwf = get_ecmwf(city_slug, dates)
@@ -224,47 +259,91 @@ def take_forecast_snapshot(city_slug: str, dates: list[str]) -> dict:
         hrrr = {}
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
     two_days = (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y-%m-%d")
     loc = LOCATIONS[city_slug]
 
+    # METAR: fetch once for today (real observation)
+    metar_temp = None
+    try:
+        metar_temp = get_metar(city_slug)
+    except Exception:
+        pass
+
     snapshots = {}
     for date in dates:
-        metar_temp = None
-        if date == today:
-            try:
-                metar_temp = get_metar(city_slug)
-            except Exception:
-                pass
-
         snap = {
             "ts":    now_str,
             "ecmwf": ecmwf.get(date),
             "hrrr":  hrrr.get(date) if date <= two_days else None,
-            "metar": metar_temp,
+            "metar": metar_temp if date == today else None,
         }
 
-        # Collect all available forecasts for disagreement analysis
+        # ── Ensemble weighted average ──────────────────────────────
+        # Weights based on proven skill at each horizon:
+        #   D+0: METAR=0.7 HRRR=0.2 ECMWF=0.1  (obs > NWP)
+        #   D+1: HRRR=0.6  ECMWF=0.4            (short-range NWP)
+        #   D+2: HRRR=0.5  ECMWF=0.5            (equal skill at 2 days)
+        #   D+3: ECMWF=1.0                       (HRRR unreliable >48h)
         all_forecasts = []
-        if snap["ecmwf"] is not None:
-            all_forecasts.append(snap["ecmwf"])
-        if snap["hrrr"] is not None:
-            all_forecasts.append(snap["hrrr"])
-        if snap["metar"] is not None:
-            all_forecasts.append(snap["metar"])
+        weighted_sum = 0.0
+        weight_total = 0.0
+
+        if date == today:
+            if snap["metar"] is not None:
+                all_forecasts.append(snap["metar"])
+                weighted_sum += snap["metar"] * 0.70
+                weight_total += 0.70
+            if snap["hrrr"] is not None:
+                all_forecasts.append(snap["hrrr"])
+                weighted_sum += snap["hrrr"] * 0.20
+                weight_total += 0.20
+            if snap["ecmwf"] is not None:
+                all_forecasts.append(snap["ecmwf"])
+                weighted_sum += snap["ecmwf"] * 0.10
+                weight_total += 0.10
+        elif date == tomorrow:
+            if snap["hrrr"] is not None:
+                all_forecasts.append(snap["hrrr"])
+                weighted_sum += snap["hrrr"] * 0.60
+                weight_total += 0.60
+            if snap["ecmwf"] is not None:
+                all_forecasts.append(snap["ecmwf"])
+                weighted_sum += snap["ecmwf"] * 0.40
+                weight_total += 0.40
+        elif date <= two_days:
+            if snap["hrrr"] is not None:
+                all_forecasts.append(snap["hrrr"])
+                weighted_sum += snap["hrrr"] * 0.50
+                weight_total += 0.50
+            if snap["ecmwf"] is not None:
+                all_forecasts.append(snap["ecmwf"])
+                weighted_sum += snap["ecmwf"] * 0.50
+                weight_total += 0.50
+        else:  # D+3 and beyond: ECMWF only
+            if snap["ecmwf"] is not None:
+                all_forecasts.append(snap["ecmwf"])
+                weighted_sum += snap["ecmwf"] * 1.00
+                weight_total += 1.00
+
         snap["all_forecasts"] = all_forecasts
 
-        # Best forecast: HRRR for US D+0/D+1, otherwise ECMWF
-        if loc["region"] == "us" and snap["hrrr"] is not None:
-            snap["best"] = snap["hrrr"]
-            snap["best_source"] = "hrrr"
-        elif snap["ecmwf"] is not None:
-            snap["best"] = snap["ecmwf"]
-            snap["best_source"] = "ecmwf"
+        # Best estimate: weighted ensemble average when multiple sources available
+        if weight_total > 0:
+            snap["best"] = round(weighted_sum / weight_total, 1)
+            # Determine primary source label for logging
+            if date == today and snap["metar"] is not None:
+                snap["best_source"] = "metar"
+            elif snap["hrrr"] is not None and date <= two_days:
+                snap["best_source"] = "hrrr+ecmwf" if snap["ecmwf"] is not None else "hrrr"
+            else:
+                snap["best_source"] = "ecmwf"
         else:
             snap["best"] = None
             snap["best_source"] = None
 
         snapshots[date] = snap
 
+    _cache_set(cache_key, snapshots)
     return snapshots
 

@@ -36,10 +36,26 @@ def load_cal() -> dict:
 
 
 def get_sigma(city_slug: str, source: str = "ecmwf") -> float:
-    """Get calibrated sigma for a city+source. Falls back to default."""
+    """Get calibrated sigma for a city+source. Falls back to city-type default."""
     key = f"{city_slug}_{source}"
     if key in _cal:
         return _cal[key]["sigma"]
+
+    # City-specific base sigmas: tropical/equatorial cities have much lower variance
+    # than mid-latitude cities. Overrides global SIGMA_F/SIGMA_C defaults.
+    CITY_SIGMA_OVERRIDES = {
+        # Tropical/equatorial — very stable temperatures, ECMWF very accurate
+        "singapore":    1.2,
+        "lucknow":      1.5,
+        "sao-paulo":    1.5,
+        "miami":        2.5,  # Fahrenheit but tropical
+        # Patagonia/Southern Hemisphere — high variability
+        "buenos-aires": 3.0,
+        "wellington":   3.5,
+    }
+    if city_slug in CITY_SIGMA_OVERRIDES:
+        return CITY_SIGMA_OVERRIDES[city_slug]
+
     return settings.SIGMA_F if LOCATIONS[city_slug]["unit"] == "F" else settings.SIGMA_C
 
 

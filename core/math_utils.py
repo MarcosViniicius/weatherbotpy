@@ -28,13 +28,25 @@ def bucket_prob(forecast: float, t_low: float, t_high: float, sigma: float = 2.0
     Probability that the actual temperature falls in [t_low, t_high].
     Uses a Gaussian mixture model (90% main + 10% fat tail with 2.5x sigma)
     to account for forecast busts and extreme events.
+
+    v3.2: Overconfidence guard — probability for a single 1-2°F/C bucket
+    cannot realistically exceed 60% even with good sigma. Cap at 65% to prevent
+    edge inflation from degenerate cases (e.g. sigma very small).
     """
     # Main component (90% weight)
     p_main = _single_normal_prob(forecast, t_low, t_high, sigma)
     # Fat tail component (10% weight, wider distribution)
     p_tail = _single_normal_prob(forecast, t_low, t_high, sigma * 2.5)
 
-    return 0.90 * p_main + 0.10 * p_tail
+    p = 0.90 * p_main + 0.10 * p_tail
+
+    # Sanity cap: no single 1-degree bucket should ever have >65% probability
+    # (implies sigma would need to be near-zero, which means model is lying)
+    bucket_width = abs(t_high - t_low) if t_low != t_high and t_low != -999 and t_high != 999 else 10.0
+    if bucket_width <= 2.0:
+        p = min(p, 0.65)
+
+    return p
 
 
 def _single_normal_prob(forecast: float, t_low: float, t_high: float, sigma: float) -> float:

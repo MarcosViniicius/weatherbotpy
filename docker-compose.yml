@@ -3,8 +3,6 @@
 # Production-ready with volume management and auto-restart
 # ════════════════════════════════════════════════════════════
 
-version: '3.9'
-
 services:
   weatherbot:
     # Build the image
@@ -29,6 +27,8 @@ services:
     volumes:
       # Risk config — keep host and container in sync
       - ./risk.toml:/app/risk.toml
+      # Dashboard HTML — live edit without rebuilding image
+      - ./dashboard.html:/app/dashboard.html:ro
       # Persistent data directory — bind mount to local folder
       - ./data:/app/data
       # Optional: logs directory — bind mount to local folder

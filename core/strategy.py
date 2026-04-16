@@ -75,15 +75,16 @@ def _rollout_thresholds() -> dict:
         "min_edge": float(settings.MIN_EDGE),
         "max_relative_spread": 0.15,
     }
+    # NOTE: relax_stage only LOOSENS thresholds, never tightens them
     if stage >= 1:
-        cfg["min_volume"] = min(cfg["min_volume"], 150)
+        cfg["min_volume"] = min(cfg["min_volume"], 200)   # floor at 200 (not below config)
     if stage >= 2:
         cfg["max_slippage"] = max(cfg["max_slippage"], 0.03)
         cfg["max_relative_spread"] = max(cfg["max_relative_spread"], 0.20)
     if stage >= 3:
         cfg["max_price"] = max(cfg["max_price"], 0.65)
     if stage >= 4:
-        cfg["min_edge"] = min(cfg["min_edge"], 0.04)
+        cfg["min_edge"] = min(cfg["min_edge"], 0.06)   # floor at 6%, not 4%
     return cfg
 
 
@@ -180,9 +181,87 @@ def scan_and_update() -> tuple[int, int, int]:
     thresholds = _rollout_thresholds()
     cycle_stats = _new_cycle_stats(thresholds)
 
+    # ── Max open positions guard ──────────────────────────
+    MAX_OPEN_POSITIONS = 5  # Never allocate more than 5 simultaneous bets
+    all_markets_snapshot = load_all_markets()
+    current_open = sum(
+        1 for m in all_markets_snapshot
+        if m.get("position") and m["position"].get("status") == "open"
+    )
+
+    # ── Per-city state: which cities already have open positions?
+    cities_with_open_pos: set[str] = set()
+    # Cooldown: city+date pairs that lost recently (24h lockout)
+    _24h_ago = (now - timedelta(hours=24)).isoformat()
+    cooldown_keys: set[str] = set()
+    for _m in all_markets_snapshot:
+        _p = _m.get("position")
+        if _p:
+            if _p.get("status") == "open":
+                cities_with_open_pos.add(_m["city"])
+            elif (
+                _p.get("status") == "closed"
+                and _p.get("close_reason") in ("stop_loss", "forecast_shift_close")
+                and _p.get("closed_at", "") >= _24h_ago
+            ):
+                cooldown_keys.add(f"{_m['city']}_{_m['date']}")
+
+    # ── Stale ghost market cleanup ──────────────────────────
+    # Markets >24h past their resolution date with open positions
+    # are ghost trades: force-close them to unlock city slots
+    for _m in all_markets_snapshot:
+        if _m.get("status") == "resolved":
+            continue
+        _end = _m.get("event_end_date", "")
+        if not _end:
+            continue
+        _overdue_hours = -pm_read.hours_to_resolution(_end)  # negative = past
+        if _overdue_hours > 24:
+            _p = _m.get("position")
+            if _p and _p.get("status") == "open":
+                logger.warning(
+                    "[CLEANUP] Ghost market %s %s overdue %.0fh — force-closing",
+                    _m["city"], _m["date"], _overdue_hours
+                )
+                _p["status"] = "closed"
+                _p["close_reason"] = "ghost_cleanup"
+                _p["pnl"] = 0.0
+                _p["closed_at"] = now.isoformat()
+                _m["status"] = "resolved"
+                save_market(_m)  # already imported at module level
+
+    # ── Drawdown kill-switch ─────────────────────────────
+    # Pause new entries if we've lost >50% from starting balance
+    starting_bal = state.get("starting_balance", settings.BALANCE) or settings.BALANCE
+    drawdown_pct = (balance - starting_bal) / starting_bal if starting_bal > 0 else 0
+    drawdown_kill = drawdown_pct <= -0.50  # Lost 50% or more
+    if drawdown_kill:
+        logger.warning(
+            "[DRAWDOWN] Balance $%.2f is %.0f%% below start $%.2f — suspending new entries",
+            balance, abs(drawdown_pct) * 100, starting_bal
+        )
+        _notify(
+            f"⚠️ [DRAWDOWN GUARD] Balance ${balance:.2f} is {abs(drawdown_pct):.0%} below "
+            f"starting ${starting_bal:.2f}. New entries SUSPENDED. \n"
+            f"Use /setrisk balance <amount> to reset when ready."
+        )
+
     for city_slug, loc in LOCATIONS.items():
         unit = loc["unit"]
         unit_sym = "F" if unit == "F" else "C"
+
+        # Liquidity window: skip cities where local time is 00h-07h
+        # Markets have very low volume and wide spreads during these hours
+        try:
+            from config.locations import TIMEZONES
+            import zoneinfo
+            city_tz = zoneinfo.ZoneInfo(TIMEZONES.get(city_slug, "UTC"))
+            local_hour = now.astimezone(city_tz).hour
+            if 0 <= local_hour < 7:
+                logger.debug("[SKIP] city=%s local_hour=%d (liquidity window)", city_slug, local_hour)
+                continue
+        except Exception:
+            pass  # If tz lookup fails, proceed normally
 
         try:
             dates = [(now + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(4)]
@@ -365,6 +444,22 @@ def scan_and_update() -> tuple[int, int, int]:
 
             # ── OPEN POSITION (v3.1 — improved) ──────────
             if not mkt.get("position") and forecast_temp is not None and hours >= settings.MIN_HOURS:
+                # Hard cap: don't open if already at max positions
+                if (current_open + new_pos) >= MAX_OPEN_POSITIONS:
+                    logger.debug("[SKIP] Max open positions reached (%d)", MAX_OPEN_POSITIONS)
+                    continue
+                # Drawdown kill-switch: suspend new entries during severe drawdown
+                if drawdown_kill:
+                    continue
+                # Per-city cap: only 1 open position per city at a time
+                if city_slug in cities_with_open_pos:
+                    logger.debug("[SKIP] city=%s already has an open position", city_slug)
+                    continue
+                # Cooldown: skip city+date that suffered a recent stop-loss
+                cooldown_key = f"{city_slug}_{date}"
+                if cooldown_key in cooldown_keys:
+                    logger.info("[SKIP] city=%s date=%s in 24h loss cooldown", city_slug, date)
+                    continue
                 # 1. Dynamic sigma: base + forecast disagreement + horizon scaling
                 base_sigma = get_sigma(city_slug, best_source or "ecmwf")
                 sigma = forecast_disagreement_sigma(all_forecasts, base_sigma, hours)
@@ -550,6 +645,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             mkt["position"] = best_signal
                             state["total_trades"] += 1
                             new_pos += 1
+                            cities_with_open_pos.add(city_slug)  # prevent same-city re-entry this cycle
                             cycle_stats["signals_generated"] += 1
                             cycle_stats["net_ev_sum"] += best_signal.get("net_ev", 0.0)
                             cycle_stats["real_spread_sum"] += best_signal.get("spread", 0.0)
@@ -602,6 +698,15 @@ def scan_and_update() -> tuple[int, int, int]:
         size = pos["cost"]
         shares = pos["shares"]
         pnl = round(shares * (1 - price), 2) if won else round(-size, 2)
+
+        # Fetch actual temperature for calibration (non-blocking failure OK)
+        try:
+            from core.forecasts import get_actual_temp
+            actual_temp = get_actual_temp(mkt["city"], mkt["date"])
+            if actual_temp is not None:
+                mkt["actual_temp"] = actual_temp
+        except Exception:
+            pass
 
         balance += size + pnl
         pos["exit_price"] = 1.0 if won else 0.0
@@ -689,13 +794,15 @@ def monitor_positions() -> int:
         end_date = mkt.get("event_end_date", "")
         hours_left = pm_read.hours_to_resolution(end_date) if end_date else 999.0
 
-        # Take-profit thresholds
+        # Take-profit thresholds: close when price moved UP enough from entry
+        entry_price = pos["entry_price"]
         if hours_left < 24:
-            take_profit = None
+            take_profit = None  # Near resolution: let it resolve naturally
         elif hours_left < 48:
-            take_profit = 0.85
+            take_profit_mult = 1.60  # 60% gain from entry
         else:
-            take_profit = 0.75
+            take_profit_mult = 2.00  # 100% gain from entry (double)
+        take_profit = entry_price * take_profit_mult if hours_left >= 24 else None
 
         # FORECAST SHIFT: if forecast moved significantly away, close position
         # (replaces rigid stop-loss)
