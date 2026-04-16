@@ -24,6 +24,55 @@ _thread: Thread | None = None
 DASHBOARD_PORT = settings.DASHBOARD_PORT
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _execution_metrics(pos: dict) -> dict:
+    expected_entry = _safe_float(pos.get("expected_fill_price", pos.get("entry_price")))
+    avg_entry = _safe_float(pos.get("avg_entry_price", pos.get("entry_price")))
+    expected_exit = _safe_float(pos.get("expected_exit_price", pos.get("exit_price")))
+    avg_exit = _safe_float(pos.get("avg_exit_price", pos.get("exit_price")))
+    requested_shares = _safe_float(pos.get("requested_shares", pos.get("shares")))
+    filled_shares = _safe_float(pos.get("filled_shares", pos.get("shares")))
+    exit_requested_shares = _safe_float(pos.get("exit_requested_shares", requested_shares))
+    exit_filled_shares = _safe_float(pos.get("exit_filled_shares", 0.0))
+    expected_cost = _safe_float(pos.get("requested_cost", pos.get("cost")))
+    realized_pnl = _safe_float(pos.get("realized_pnl", pos.get("pnl")))
+
+    entry_slippage_bps = 0.0
+    if expected_entry > 0:
+        entry_slippage_bps = ((avg_entry - expected_entry) / expected_entry) * 10000
+
+    exit_slippage_bps = 0.0
+    if expected_exit > 0 and avg_exit > 0:
+        exit_slippage_bps = ((expected_exit - avg_exit) / expected_exit) * 10000
+
+    fill_rate = filled_shares / requested_shares if requested_shares > 0 else 1.0
+    exit_fill_rate = exit_filled_shares / exit_requested_shares if exit_requested_shares > 0 else 0.0
+    expected_ev_dollars = expected_cost * _safe_float(pos.get("net_ev", pos.get("ev")))
+    realized_ev_pct = realized_pnl / expected_cost if expected_cost > 0 else 0.0
+
+    return {
+        "expected_entry_price": round(expected_entry, 4),
+        "avg_entry_price": round(avg_entry, 4),
+        "expected_exit_price": round(expected_exit, 4) if expected_exit > 0 else None,
+        "avg_exit_price": round(avg_exit, 4) if avg_exit > 0 else None,
+        "entry_slippage_bps": round(entry_slippage_bps, 1),
+        "exit_slippage_bps": round(exit_slippage_bps, 1),
+        "fill_rate": round(fill_rate, 4),
+        "exit_fill_rate": round(exit_fill_rate, 4),
+        "expected_ev_dollars": round(expected_ev_dollars, 2),
+        "realized_ev_pct": round(realized_ev_pct, 4),
+        "realized_pnl": round(realized_pnl, 2),
+    }
+
+
 # ═══════════════════════════════════════════════════════════
 # AUTHENTICATION
 # ═══════════════════════════════════════════════════════════
@@ -72,22 +121,54 @@ def _build_api_data() -> dict:
     markets = load_all_markets()
     mode = get_mode()
 
+    def quote_for_side(outcome: dict, side: str) -> tuple[float, float]:
+        bid = float(outcome.get("bid", outcome.get("price", 0.0)) or 0.0)
+        ask = float(outcome.get("ask", outcome.get("price", 0.0)) or 0.0)
+        if side == "NO":
+            return max(0.0, 1.0 - ask), min(0.9999, 1.0 - bid)
+        return bid, ask
+
     # Open positions
     positions = {}
+    execution_rollup = {
+        "entries": 0,
+        "exits": 0,
+        "avg_entry_slippage_bps": 0.0,
+        "avg_exit_slippage_bps": 0.0,
+        "avg_fill_rate": 0.0,
+        "avg_exit_fill_rate": 0.0,
+        "expected_ev_dollars": 0.0,
+        "realized_pnl": 0.0,
+    }
     for m in markets:
         pos = m.get("position")
-        if not pos or pos.get("status") != "open":
+        if not pos:
+            continue
+
+        exec_metrics = _execution_metrics(pos)
+        execution_rollup["entries"] += 1
+        execution_rollup["avg_entry_slippage_bps"] += exec_metrics["entry_slippage_bps"]
+        execution_rollup["avg_fill_rate"] += exec_metrics["fill_rate"]
+        execution_rollup["expected_ev_dollars"] += exec_metrics["expected_ev_dollars"]
+        execution_rollup["realized_pnl"] += exec_metrics["realized_pnl"]
+        if exec_metrics["exit_fill_rate"] > 0:
+            execution_rollup["exits"] += 1
+            execution_rollup["avg_exit_slippage_bps"] += exec_metrics["exit_slippage_bps"]
+            execution_rollup["avg_exit_fill_rate"] += exec_metrics["exit_fill_rate"]
+
+        if pos.get("status") != "open":
             continue
 
         mid = pos.get("market_id", m["city"] + "_" + m["date"])
         unit_sym = "F" if m.get("unit") == "F" else "C"
         bl = pos.get("bucket_low", 0)
         bh = pos.get("bucket_high", 0)
+        side = str(pos.get("side") or "YES").upper()
 
         current_price = pos["entry_price"]
         for o in m.get("all_outcomes", []):
             if o["market_id"] == pos["market_id"]:
-                current_price = o.get("bid", o["price"])
+                current_price, _ = quote_for_side(o, side)
                 break
 
         unrealized = round((current_price - pos["entry_price"]) * pos["shares"], 2)
@@ -104,6 +185,8 @@ def _build_api_data() -> dict:
             "question": question,
             "location": m.get("city_name", m["city"]),
             "date": m["date"],
+            "status": pos.get("status", "open"),
+            "side": side,
             "entry_price": pos["entry_price"],
             "current_price": current_price,
             "cost": pos["cost"],
@@ -121,6 +204,7 @@ def _build_api_data() -> dict:
             "sigma": pos.get("sigma", 0),
             "confidence": pos.get("confidence", 1),
             "opened_at": pos.get("opened_at", ""),
+            **exec_metrics,
         }
 
     # Trade history (all entries + closed)
@@ -141,6 +225,7 @@ def _build_api_data() -> dict:
             "question": question,
             "location": m.get("city_name", m["city"]),
             "date": m["date"],
+            "side": str(pos.get("side") or "YES").upper(),
             "entry_price": pos["entry_price"],
             "cost": pos["cost"],
             "ev": pos.get("ev", 0),
@@ -148,6 +233,7 @@ def _build_api_data() -> dict:
             "kelly_pct": pos.get("kelly", 0),
             "our_prob": pos.get("p", 0),
             "opened_at": pos.get("opened_at", ""),
+            **exec_metrics,
         })
 
         # Exit trade (if closed)
@@ -157,6 +243,7 @@ def _build_api_data() -> dict:
                 "question": question,
                 "location": m.get("city_name", m["city"]),
                 "date": m["date"],
+                "side": str(pos.get("side") or "YES").upper(),
                 "exit_price": pos.get("exit_price", 0),
                 "pnl": pos["pnl"],
                 "close_reason": pos.get("close_reason", ""),
@@ -164,10 +251,28 @@ def _build_api_data() -> dict:
                 "ev": pos.get("ev", 0),
                 "edge": pos.get("edge", 0),
                 "kelly_pct": pos.get("kelly", 0),
+                **exec_metrics,
             })
 
     # Sort trades by time (newest first in JSON, dashboard reverses)
     trades.sort(key=lambda t: t.get("opened_at") or t.get("closed_at") or "")
+
+    if execution_rollup["entries"] > 0:
+        execution_rollup["avg_entry_slippage_bps"] = round(
+            execution_rollup["avg_entry_slippage_bps"] / execution_rollup["entries"], 1
+        )
+        execution_rollup["avg_fill_rate"] = round(
+            execution_rollup["avg_fill_rate"] / execution_rollup["entries"], 4
+        )
+    if execution_rollup["exits"] > 0:
+        execution_rollup["avg_exit_slippage_bps"] = round(
+            execution_rollup["avg_exit_slippage_bps"] / execution_rollup["exits"], 1
+        )
+        execution_rollup["avg_exit_fill_rate"] = round(
+            execution_rollup["avg_exit_fill_rate"] / execution_rollup["exits"], 4
+        )
+    execution_rollup["expected_ev_dollars"] = round(execution_rollup["expected_ev_dollars"], 2)
+    execution_rollup["realized_pnl"] = round(execution_rollup["realized_pnl"], 2)
 
     return {
         "balance": state["balance"],
@@ -179,6 +284,7 @@ def _build_api_data() -> dict:
         "positions": positions,
         "trades": trades,
         "calibration": compute_calibration_report(),
+        "execution": execution_rollup,
         "mode": mode,
         "scan_activity": get_scan_activity(),
         "updated_at": datetime.now(timezone.utc).isoformat(),

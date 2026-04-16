@@ -130,6 +130,42 @@ def bet_size(kelly: float, balance: float) -> float:
     return round(min(raw, settings.MAX_BET), 2)
 
 
+def adaptive_bet_size(
+    kelly: float,
+    balance: float,
+    max_fraction_of_balance: float = 0.12,
+    max_fraction_of_depth: float | None = None,
+    concentration_multiplier: float = 1.0,
+) -> float:
+    """
+    Conservative bankroll-aware sizing.
+
+    Caps risk by:
+      - Kelly sizing
+      - absolute max bet
+      - fraction of bankroll
+      - optional visible book depth
+      - portfolio concentration multiplier
+    """
+    kelly_cap = max(0.0, float(kelly)) * max(0.0, float(balance))
+    bankroll_cap = max(0.0, float(balance)) * max(0.0, float(max_fraction_of_balance))
+    caps = [settings.MAX_BET, kelly_cap, bankroll_cap]
+    if max_fraction_of_depth is not None:
+        caps.append(max(0.0, float(max_fraction_of_depth)))
+    raw = min(caps) * max(0.0, float(concentration_multiplier))
+    return round(max(0.0, raw), 2)
+
+
+def portfolio_concentration_multiplier(open_positions: int) -> float:
+    """
+    Size down as concurrent exposure rises.
+    Keeps logic adaptive without requiring extra knobs in risk.toml.
+    """
+    if open_positions <= 0:
+        return 1.0
+    return max(0.35, round(1.0 - min(open_positions, 5) * 0.12, 2))
+
+
 def in_bucket(forecast: float, t_low: float, t_high: float) -> bool:
     """Check if a forecast temperature falls within a bucket range."""
     if t_low == t_high:

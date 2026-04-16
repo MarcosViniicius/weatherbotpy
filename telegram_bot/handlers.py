@@ -669,7 +669,7 @@ async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_calibration(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /calibration — show Brier score and accuracy curve."""
+    """Handle /calibration — show Brier score and hit-rate curve."""
     try:
         if not _authorized(update):
             return await _deny(update)
@@ -685,7 +685,7 @@ async def cmd_calibration(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚖️ *Forecast Calibration*",
             f"Total Predictions: {rep['total']}",
             f"Brier Score: {rep['brier_score']:.4f} \\(closer to 0 is better\\)",
-            f"Directional Accuracy: {rep['accuracy']:.1%} \\(>50% win rate when p>0\\.5\\)",
+            f"Trade Hit Rate: {rep['hit_rate']:.1%} \\(resolved executed trades\\)",
             "",
             "📊 *Curve* \\(Predicted vs Actual\\):"
         ]

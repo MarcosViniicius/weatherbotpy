@@ -1,17 +1,27 @@
 """
-connectors/polymarket_trade.py — Polymarket CLOB trading connector.
+Polymarket CLOB trading connector.
 Uses py-clob-client for authenticated order placement.
 Only called in production mode.
 """
 
-import logging
 import inspect
+import logging
+
 from config import settings
-from connectors.resilience import retry_with_backoff, clob_cb
+from connectors.resilience import clob_cb, retry_with_backoff
 
 logger = logging.getLogger("weatherbet.polymarket_trade")
 
 _client = None
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _get_client():
@@ -22,7 +32,7 @@ def _get_client():
 
     pk = str(settings.POLYMARKET_PRIVATE_KEY or "").strip()
     if not pk or pk.lower().startswith("your-"):
-        logger.error("[CLOB] No valid private key configured — cannot trade")
+        logger.error("[CLOB] No valid private key configured - cannot trade")
         return None
 
     try:
@@ -59,8 +69,17 @@ def _extract_numeric_balance(payload, depth: int = 0) -> float | None:
             return None
     if isinstance(payload, dict):
         for key in (
-            "balance", "available", "total", "amount", "usdc", "usdc_balance",
-            "collateral", "value", "asset_balance", "numericBalance", "numeric_balance",
+            "balance",
+            "available",
+            "total",
+            "amount",
+            "usdc",
+            "usdc_balance",
+            "collateral",
+            "value",
+            "asset_balance",
+            "numericBalance",
+            "numeric_balance",
         ):
             if key in payload:
                 parsed = _extract_numeric_balance(payload.get(key), depth + 1)
@@ -130,10 +149,6 @@ def get_wallet_balance() -> float | None:
     return None
 
 
-# ═══════════════════════════════════════════════════════════
-# ORDER PLACEMENT
-# ═══════════════════════════════════════════════════════════
-
 @retry_with_backoff(max_retries=2, base_delay=1.0)
 def place_limit_order(
     token_id: str,
@@ -146,7 +161,7 @@ def place_limit_order(
 
     Args:
         token_id: The outcome token ID.
-        price: Price per share (0.01 – 0.99).
+        price: Price per share (0.01 - 0.99).
         size: Number of shares.
         side: "BUY" or "SELL".
 
@@ -158,10 +173,9 @@ def place_limit_order(
         return None
 
     if not clob_cb.can_execute():
-        logger.warning("[CLOB] Circuit open — skipping order")
+        logger.warning("[CLOB] Circuit open - skipping order")
         return None
 
-    # Validate parameters
     if price <= 0 or price >= 1:
         logger.error("[CLOB] Invalid price: %.4f", price)
         return None
@@ -183,7 +197,7 @@ def place_limit_order(
         signed = client.create_order(order_args)
         resp = client.post_order(signed, OrderType.GTC)
         clob_cb.record_success()
-        logger.info("[CLOB] Order placed: %s %s shares @ $%.3f → %s", side, size, price, resp)
+        logger.info("[CLOB] Order placed: %s %s shares @ $%.3f -> %s", side, size, price, resp)
         return resp
     except Exception as e:
         clob_cb.record_failure()
@@ -210,7 +224,7 @@ def place_market_order(
         return None
 
     if not clob_cb.can_execute():
-        logger.warning("[CLOB] Circuit open — skipping market order")
+        logger.warning("[CLOB] Circuit open - skipping market order")
         return None
 
     if amount < 0.50:
@@ -231,17 +245,13 @@ def place_market_order(
         signed = client.create_market_order(mo)
         resp = client.post_order(signed, OrderType.FOK)
         clob_cb.record_success()
-        logger.info("[CLOB] Market order: %s $%.2f → %s", side, amount, resp)
+        logger.info("[CLOB] Market order: %s $%.2f -> %s", side, amount, resp)
         return resp
     except Exception as e:
         clob_cb.record_failure()
         logger.error("[CLOB] Market order failed: %s", e)
         raise
 
-
-# ═══════════════════════════════════════════════════════════
-# ORDER MANAGEMENT
-# ═══════════════════════════════════════════════════════════
 
 def cancel_order(order_id: str) -> dict | None:
     """Cancel a specific open order."""
@@ -278,6 +288,7 @@ def get_open_orders() -> list:
         return []
     try:
         from py_clob_client.clob_types import OpenOrderParams
+
         orders = client.get_orders(OpenOrderParams())
         return orders if orders else []
     except Exception as e:
@@ -290,47 +301,225 @@ def get_order_status(order_id: str) -> str | None:
     Check the fill status of a specific CLOB order.
 
     Returns:
-        "open"      — order exists and is unfilled / partially filled
-        "matched"   — order fully filled
-        "cancelled" — order was cancelled
-        None        — could not determine (API error or order not found)
+        "open"      - order exists and is unfilled
+        "partial"   - order has some matched size but remains working
+        "matched"   - order fully filled
+        "cancelled" - order was cancelled
+        None        - could not determine
     """
     client = _get_client()
     if client is None:
         return None
     try:
-        # Try getting order by ID directly
-        if hasattr(client, "get_order"):
-            order = client.get_order(order_id)
-            if order:
-                status = str(order.get("status", "")).lower()
-                if status in ("matched", "filled"):
-                    return "matched"
-                if status in ("cancelled", "canceled"):
-                    return "cancelled"
-                return "open"
-
-        # Fallback: scan open orders list
-        open_orders = get_open_orders()
-        open_ids = {str(o.get("id") or o.get("orderID", "")) for o in open_orders}
-        if order_id in open_ids:
-            return "open"
-
-        # Not in open orders → assume filled (most common case after GTC execution)
-        return "matched"
+        detail = get_order_status_detail(order_id)
+        return detail.get("status")
     except Exception as e:
         logger.warning("[CLOB] get_order_status(%s) failed: %s", order_id, e)
         return None
 
 
-def get_trades() -> list:
-    """Get recent trade history."""
+def get_order_status_detail(order_id: str) -> dict:
+    """Best-effort status detail for a specific order."""
+    client = _get_client()
+    if client is None:
+        return {"status": None, "matched_size": 0.0, "original_size": 0.0, "remaining_size": 0.0, "avg_price": None}
+    try:
+        if hasattr(client, "get_order"):
+            order = client.get_order(order_id)
+            if order:
+                raw_status = str(order.get("status", "")).lower()
+                original_size = _safe_float(order.get("original_size", order.get("size", order.get("initial_size", 0.0))))
+                matched_size = _safe_float(order.get("size_matched", order.get("matched_size", order.get("filled_size", 0.0))))
+                remaining_size = _safe_float(order.get("size_remaining", order.get("remaining_size", max(0.0, original_size - matched_size))))
+                avg_price_raw = order.get("avg_price")
+                avg_price = _safe_float(avg_price_raw, None) if avg_price_raw is not None else None
+
+                if raw_status in ("matched", "filled"):
+                    status = "matched"
+                elif raw_status in ("cancelled", "canceled"):
+                    status = "cancelled"
+                elif matched_size > 0 and remaining_size > 0:
+                    status = "partial"
+                elif raw_status:
+                    status = "open"
+                else:
+                    status = "unknown"
+
+                return {
+                    "status": status,
+                    "matched_size": round(matched_size, 4),
+                    "original_size": round(original_size, 4),
+                    "remaining_size": round(remaining_size, 4),
+                    "avg_price": avg_price,
+                }
+
+        open_orders = get_open_orders()
+        open_map = {str(o.get("id") or o.get("orderID", "")): o for o in open_orders}
+        open_order = open_map.get(str(order_id))
+        if open_order:
+            original_size = _safe_float(open_order.get("original_size", open_order.get("size", open_order.get("initial_size", 0.0))))
+            matched_size = _safe_float(open_order.get("size_matched", open_order.get("matched_size", open_order.get("filled_size", 0.0))))
+            remaining_size = _safe_float(open_order.get("size_remaining", open_order.get("remaining_size", max(0.0, original_size - matched_size))))
+            status = "partial" if matched_size > 0 and remaining_size > 0 else "open"
+            return {
+                "status": status,
+                "matched_size": round(matched_size, 4),
+                "original_size": round(original_size, 4),
+                "remaining_size": round(remaining_size, 4),
+                "avg_price": None,
+            }
+
+        return {"status": "unknown", "matched_size": 0.0, "original_size": 0.0, "remaining_size": 0.0, "avg_price": None}
+    except Exception as e:
+        logger.warning("[CLOB] get_order_status_detail(%s) failed: %s", order_id, e)
+        return {"status": None, "matched_size": 0.0, "original_size": 0.0, "remaining_size": 0.0, "avg_price": None}
+
+
+def _normalize_trade(trade: dict) -> dict | None:
+    if not isinstance(trade, dict):
+        return None
+
+    order_id = str(
+        trade.get("order_id")
+        or trade.get("orderID")
+        or trade.get("maker_order_id")
+        or trade.get("taker_order_id")
+        or ""
+    )
+    token_id = str(trade.get("asset_id") or trade.get("token_id") or trade.get("tokenID") or "")
+    side = str(trade.get("side") or trade.get("taker_side") or "").upper()
+    size = _safe_float(trade.get("size", trade.get("matched_size", trade.get("amount", 0.0))))
+    price = _safe_float(trade.get("price", trade.get("matched_price", trade.get("rate", 0.0))))
+    trade_id = str(trade.get("id") or trade.get("tradeID") or trade.get("match_id") or "")
+    ts = trade.get("created_at") or trade.get("timestamp") or trade.get("time") or trade.get("matched_at")
+    if size <= 0 or price <= 0:
+        return None
+    return {
+        "id": trade_id,
+        "order_id": order_id,
+        "token_id": token_id,
+        "side": side,
+        "size": round(size, 4),
+        "price": round(price, 6),
+        "timestamp": ts,
+        "raw": trade,
+    }
+
+
+def get_trades(order_id: str | None = None, token_id: str | None = None) -> list:
+    """Get recent trade history, optionally filtered and normalized."""
     client = _get_client()
     if client is None:
         return []
     try:
         trades = client.get_trades()
-        return trades if trades else []
+        if not trades:
+            return []
+        normalized = []
+        for trade in trades:
+            parsed = _normalize_trade(trade)
+            if not parsed:
+                continue
+            if order_id and parsed["order_id"] != str(order_id):
+                continue
+            if token_id and parsed["token_id"] != str(token_id):
+                continue
+            normalized.append(parsed)
+        return normalized
     except Exception as e:
         logger.error("[CLOB] get_trades failed: %s", e)
         return []
+
+
+def get_order_book(token_id: str) -> dict | None:
+    """Fetch order book summary for a token when the SDK exposes it."""
+    client = _get_client()
+    if client is None:
+        return None
+    try:
+        if not hasattr(client, "get_order_book"):
+            return None
+        book = client.get_order_book(token_id)
+        if not book:
+            return None
+        if isinstance(book, dict):
+            return book
+        payload = {}
+        for attr in ("market", "bids", "asks", "asset_id", "token_id"):
+            if hasattr(book, attr):
+                payload[attr] = getattr(book, attr)
+        return payload or None
+    except Exception as e:
+        logger.warning("[CLOB] get_order_book(%s) failed: %s", token_id, e)
+        return None
+
+
+def estimate_limit_price_from_book(token_id: str, side: str, size: float) -> dict | None:
+    """
+    Estimate executable price for a target size using visible book levels.
+
+    Returns:
+      price: worst visible level needed to fill `size`
+      avg_price: average visible execution price
+      filled_size: visible shares up to requested size
+      coverage: visible fraction of requested size
+      source: book | fallback_price
+    """
+    if size <= 0:
+        return None
+
+    client = _get_client()
+    if client is None:
+        return None
+
+    book = get_order_book(token_id)
+    if book:
+        book_side = "asks" if str(side).upper() == "BUY" else "bids"
+        levels = book.get(book_side)
+        if isinstance(levels, list):
+            remaining = float(size)
+            filled = 0.0
+            notional = 0.0
+            worst = None
+            for level in levels:
+                if isinstance(level, dict):
+                    price = _safe_float(level.get("price"))
+                    level_size = _safe_float(level.get("size", level.get("quantity", level.get("amount", 0.0))))
+                elif isinstance(level, (list, tuple)) and len(level) >= 2:
+                    price = _safe_float(level[0])
+                    level_size = _safe_float(level[1])
+                else:
+                    continue
+                if price <= 0 or level_size <= 0:
+                    continue
+                take = min(level_size, remaining)
+                notional += take * price
+                filled += take
+                remaining -= take
+                worst = price
+                if remaining <= 1e-9:
+                    break
+            if filled > 0:
+                return {
+                    "price": round(float(worst), 6),
+                    "avg_price": round(notional / filled, 6),
+                    "filled_size": round(filled, 4),
+                    "coverage": round(min(1.0, filled / float(size)), 4),
+                    "source": "book",
+                }
+
+    try:
+        if hasattr(client, "get_price"):
+            ref_price = _safe_float(client.get_price(token_id, side=str(side).upper()))
+            if ref_price > 0:
+                return {
+                    "price": round(ref_price, 6),
+                    "avg_price": round(ref_price, 6),
+                    "filled_size": round(float(size), 4),
+                    "coverage": 0.0,
+                    "source": "fallback_price",
+                }
+    except Exception as e:
+        logger.warning("[CLOB] get_price fallback failed for %s: %s", token_id, e)
+
+    return None

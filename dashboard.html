@@ -158,7 +158,7 @@ body::after{content:'';position:fixed;inset:0;background-image:linear-gradient(r
   <div class="stat"><div class="stat-label">Total Trades</div><div class="stat-val" id="s-total">—</div><div class="stat-sub">all time</div></div>
   <div class="stat"><div class="stat-label">Peak Balance</div><div class="stat-val" id="s-peak">—</div><div class="stat-sub">all time high</div></div>
   <div class="stat"><div class="stat-label">Brier Score</div><div class="stat-val" id="s-brier">—</div><div class="stat-sub">closer to 0 is better</div></div>
-  <div class="stat"><div class="stat-label">Calibration</div><div class="stat-val yellow" id="s-calacc">—</div><div class="stat-sub">directional accuracy</div></div>
+  <div class="stat"><div class="stat-label">Trade Hit Rate</div><div class="stat-val yellow" id="s-calacc">—</div><div class="stat-sub">resolved long trades</div></div>
 </div>
 
 <div class="layout">
@@ -427,7 +427,7 @@ function renderPositions(positions) {
 
     return `<div class="pos-item">
       <div class="pos-top">
-        <div class="pos-q">${(p.location || '')} ${p.date || ''} · ${(p.question || '').substr(0, 40)}</div>
+        <div class="pos-q">${(p.side || 'YES')} · ${(p.location || '')} ${p.date || ''} · ${(p.question || '').substr(0, 34)}</div>
         <div class="pos-pnl ${pnl >= 0 ? 'pos' : 'neg'}">${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}</div>
       </div>
       <div class="pos-bar"><div class="pos-fill ${barColor}" style="width:${barPct}%"></div></div>
@@ -435,7 +435,9 @@ function renderPositions(positions) {
         <div>$${entry.toFixed(3)} → $${current.toFixed(3)}</div>
         <div>Kelly: <span>${(p.kelly_pct * 100).toFixed(1)}%</span></div>
         <div>Edge: <span>${fmt2((p.edge || 0) * 100)}%</span></div>
+        <div>Fill: <span>${((p.fill_rate || 0) * 100).toFixed(0)}%</span></div>
         <div>Conf: <span>${(p.confidence * 100).toFixed(0)}%</span></div>
+        <div>Slip: <span>${fmt2(p.entry_slippage_bps || 0)}bps</span></div>
         <div>Sigma: <span>${parseFloat(p.sigma).toFixed(1)}</span></div>
         <div>${hrsStr} left</div>
       </div>
@@ -460,7 +462,7 @@ function renderTrades(trades) {
       <div class="t-time">${time}</div>
       <span class="t-badge ${cls}">${label}</span>
       <div class="t-info">
-        <div class="t-q">${t.location || ''} ${t.date || ''}</div>
+        <div class="t-q">${t.side || 'YES'} · ${t.location || ''} ${t.date || ''}</div>
         <div class="t-meta">Kelly ${((t.kelly_pct || 0) * 100).toFixed(1)}% · Edge ${fmt2((t.edge || 0) * 100)}%</div>
       </div>
       <div class="t-right"><div class="t-amount ${amtCls}">${amtStr}</div></div>
@@ -476,7 +478,7 @@ function renderEvLog(trades) {
     const evCol = (t.ev || 0) > 0 ? '#00ff41' : '#ff2244';
     const time = (t.opened_at || '').substr(11, 5) || '—';
     return `<div style="padding:7px 14px;border-bottom:1px solid #0a2a0a;font-size:9px;">
-      <div style="color:#2a5a2a">${time} · ${t.location || ''} · ${t.date || ''}</div>
+      <div style="color:#2a5a2a">${time} · ${t.side || 'YES'} · ${t.location || ''} · ${t.date || ''}</div>
       <div style="color:#88ff88;margin-top:2px">Entry: $${(t.entry_price || 0).toFixed(3)} · Prob: ${((t.our_prob || 0) * 100).toFixed(0)}%</div>
       <div style="margin-top:2px">Edge: <span style="color:${evCol}">${fmt2((t.edge || 0)*100)}%</span> &nbsp;|&nbsp; Kelly: <span style="color:#ffcc00">${((t.kelly_pct || 0) * 100).toFixed(1)}%</span> &nbsp;|&nbsp; Size: <span style="color:#00ff41">$${(t.cost || 0).toFixed(2)}</span></div>
     </div>`;
@@ -507,7 +509,8 @@ function renderEdgeReality(positions) {
       </div>
       <div style="margin-top:3px">
         Leakage: <span style="color:${gapColor};font-weight:bold">${gap.toFixed(1)}%</span> &nbsp;|&nbsp; 
-        Spread: <span style="color:#ff8800">${spreadPercent.toFixed(1)}%</span>
+        Spread: <span style="color:#ff8800">${spreadPercent.toFixed(1)}%</span> &nbsp;|&nbsp;
+        Slip: <span style="color:#ffaa00">${fmt2(p.entry_slippage_bps || 0)}bps</span>
       </div>
     </div>`;
   }).join('');
@@ -606,6 +609,7 @@ async function loadData() {
     const trades = d.trades || [];
     const cal = d.calibration || {};
     const scanActivity = d.scan_activity || {};
+    const execution = d.execution || {};
     const peak = d.peak_balance || bal;
     const mode = d.mode || 'simulation';
 
@@ -644,7 +648,9 @@ async function loadData() {
     document.getElementById('s-total').textContent = totalTrades;
     document.getElementById('s-peak').textContent = '$' + peak.toFixed(2);
     document.getElementById('s-brier').textContent = cal.total > 0 ? cal.brier_score.toFixed(4) : '—';
-    document.getElementById('s-calacc').textContent = cal.total > 0 ? (cal.accuracy * 100).toFixed(1) + '%' : '—';
+    document.getElementById('s-calacc').textContent = cal.total > 0 ? (cal.hit_rate * 100).toFixed(1) + '%' : '—';
+
+    document.getElementById('s-calacc').title = `Entry slip ${fmt2(execution.avg_entry_slippage_bps || 0)}bps | Fill ${(100 * (execution.avg_fill_rate || 0)).toFixed(0)}% | ExpEV $${(execution.expected_ev_dollars || 0).toFixed(2)}`;
 
     // Chart
     if (prevBal !== null && Math.abs(bal - prevBal) > 0.05) spawnDelta(bal - prevBal);

@@ -34,6 +34,60 @@ def _fmt_shares(val):
     return escape_md(f"{val:.1f}")
 
 
+def _fmt_bps(val):
+    return escape_md(f"{val:.1f}")
+
+
+def _position_side(pos: dict) -> str:
+    return "NO" if str(pos.get("side") or "YES").upper() == "NO" else "YES"
+
+
+def _quote_for_side(outcome: dict, side: str) -> tuple[float, float, float]:
+    yes_bid = float(outcome.get("bid", outcome.get("price", 0.0)) or 0.0)
+    yes_ask = float(outcome.get("ask", outcome.get("price", 0.0)) or 0.0)
+    yes_mid = float(outcome.get("price", (yes_bid + yes_ask) / 2.0) or 0.0)
+    if side == "NO":
+        return max(0.0, 1.0 - yes_ask), min(0.9999, 1.0 - yes_bid), max(0.0, min(0.9999, 1.0 - yes_mid))
+    return yes_bid, yes_ask, yes_mid
+
+
+def _market_position_snapshot(market: dict) -> dict:
+    pos = market["position"]
+    side = _position_side(pos)
+    current_price = pos["entry_price"]
+    for outcome in market.get("all_outcomes", []):
+        if outcome["market_id"] == pos["market_id"]:
+            bid, ask, mid = _quote_for_side(outcome, side)
+            current_price = bid if bid > 0 else mid
+            break
+    return {
+        "side": side,
+        "current_price": current_price,
+        "unrealized": round((current_price - pos["entry_price"]) * pos["shares"], 2),
+        "entry_pending": pos.get("order_status") == "pending",
+        "exit_pending": pos.get("exit_order_status") == "pending",
+        "entry_partial": pos.get("order_status") == "partial",
+        "exit_partial": pos.get("exit_order_status") == "partial",
+    }
+
+
+def _execution_metrics(pos: dict) -> dict:
+    requested_shares = float(pos.get("requested_shares", pos.get("shares", 0.0)) or 0.0)
+    filled_shares = float(pos.get("filled_shares", pos.get("shares", 0.0)) or 0.0)
+    expected_fill = float(pos.get("expected_fill_price", pos.get("entry_price", 0.0)) or 0.0)
+    avg_fill = float(pos.get("avg_entry_price", pos.get("entry_price", 0.0)) or 0.0)
+    expected_ev = float(pos.get("requested_cost", pos.get("cost", 0.0)) or 0.0) * float(pos.get("net_ev", pos.get("ev", 0.0)) or 0.0)
+    realized_pnl = float(pos.get("realized_pnl", pos.get("pnl", 0.0)) or 0.0)
+    fill_rate = filled_shares / requested_shares if requested_shares > 0 else 1.0
+    slippage_bps = ((avg_fill - expected_fill) / expected_fill * 10000) if expected_fill > 0 else 0.0
+    return {
+        "fill_rate": fill_rate,
+        "slippage_bps": slippage_bps,
+        "expected_ev_dollars": expected_ev,
+        "realized_pnl": realized_pnl,
+    }
+
+
 def format_status(state: dict, open_positions: list[dict], mode: str) -> str:
     """Format bot status message."""
     bal = state["balance"]
@@ -60,7 +114,12 @@ def format_status(state: dict, open_positions: list[dict], mode: str) -> str:
     else:
         lines.append("No resolved trades yet")
 
-    lines.append(f"Open positions: {len(open_positions)}")
+    pending_entries = sum(1 for m in open_positions if m["position"].get("order_status") == "pending")
+    pending_exits = sum(1 for m in open_positions if m["position"].get("exit_order_status") == "pending")
+    partial_entries = sum(1 for m in open_positions if m["position"].get("order_status") == "partial")
+    partial_exits = sum(1 for m in open_positions if m["position"].get("exit_order_status") == "partial")
+    lines.append(f"Open positions: {len(open_positions)} \\| Entry pending: {pending_entries} \\| Exit pending: {pending_exits}")
+    lines.append(f"Partial fills: entry {partial_entries} \\| exit {partial_exits}")
 
     if open_positions:
         lines.append("")
@@ -70,25 +129,32 @@ def format_status(state: dict, open_positions: list[dict], mode: str) -> str:
             unit_sym = "F" if m["unit"] == "F" else "C"
             label = f"{pos['bucket_low']}\\-{pos['bucket_high']}{unit_sym}"
 
-            current_price = pos["entry_price"]
-            for o in m.get("all_outcomes", []):
-                if o["market_id"] == pos["market_id"]:
-                    current_price = o["price"]
-                    break
-
-            unrealized = round((current_price - pos["entry_price"]) * pos["shares"], 2)
+            snap = _market_position_snapshot(m)
+            current_price = snap["current_price"]
+            unrealized = snap["unrealized"]
             total_unrealized += unrealized
             pnl_sign = "\\+" if unrealized >= 0 else ""
             src = pos.get("forecast_src", "?").upper()
+            side = snap["side"]
+            exec_metrics = _execution_metrics(pos)
             entry_str = _fmt_price(pos["entry_price"])
             curr_str = _fmt_price(current_price)
             pnl_str = escape_md(f"{unrealized:.2f}")
+            state_tag = "EXIT\\_PARTIAL" if snap["exit_partial"] else "ENTRY\\_PARTIAL" if snap["entry_partial"] else "EXIT\\_PENDING" if snap["exit_pending"] else "ENTRY\\_PENDING" if snap["entry_pending"] else "OPEN"
 
             lines.append(
                 f"• {escape_md(m['city_name'])} {escape_md(m['date'])} \\| "
-                f"{label} \\| "
+                f"{escape_md(side)} {label} \\| "
                 f"${entry_str} → ${curr_str} \\| "
-                f"PnL: {pnl_sign}{pnl_str} \\| {src}"
+                f"PnL: {pnl_sign}{pnl_str} \\| {escape_md(state_tag)} \\| {src}"
+            )
+            lines.append(
+                "  Fill: "
+                + escape_md(f"{exec_metrics['fill_rate'] * 100:.0f}")
+                + "% \\| Slip: "
+                + _fmt_bps(exec_metrics["slippage_bps"])
+                + "bps \\| ExpEV: "
+                + escape_md(f"{exec_metrics['expected_ev_dollars']:+.2f}")
             )
 
         u_sign = "\\+" if total_unrealized >= 0 else ""
@@ -110,30 +176,33 @@ def format_positions(markets: list[dict]) -> str:
         unit_sym = "F" if m["unit"] == "F" else "C"
         label = f"{pos['bucket_low']}\\-{pos['bucket_high']}{unit_sym}"
 
-        current_price = pos["entry_price"]
-        for o in m.get("all_outcomes", []):
-            if o["market_id"] == pos["market_id"]:
-                current_price = o["price"]
-                break
-
-        unrealized = round((current_price - pos["entry_price"]) * pos["shares"], 2)
+        snap = _market_position_snapshot(m)
+        current_price = snap["current_price"]
+        unrealized = snap["unrealized"]
         pnl_sign = "\\+" if unrealized >= 0 else ""
         src = pos.get("forecast_src", "?").upper()
+        side = snap["side"]
 
         entry_str = _fmt_price(pos["entry_price"])
         curr_str = _fmt_price(current_price)
         shares_str = _fmt_shares(pos["shares"])
         cost_str = _fmt_money(pos["cost"])
         pnl_str = escape_md(f"{unrealized:.2f}")
-        ev_str = escape_md(f"{pos['ev']:+.2f}")
+        ev_str = escape_md(f"{pos.get('net_ev', pos['ev']):+.3f}")
         kelly_str = escape_md(f"{pos['kelly']:.2%}")
+        exec_metrics = _execution_metrics(pos)
+        order_state = "exit partial" if snap["exit_partial"] else "entry partial" if snap["entry_partial"] else "exit pending" if snap["exit_pending"] else "entry pending" if snap["entry_pending"] else "live"
 
         lines.append(f"*{escape_md(m['city_name'])}* — {escape_md(m['date'])}")
-        lines.append(f"  Bucket: {label}")
+        lines.append(f"  Side: {escape_md(side)} \\| Bucket: {label}")
         lines.append(f"  Entry: ${entry_str} → Now: ${curr_str}")
         lines.append(f"  Shares: {shares_str} \\| Cost: ${cost_str}")
-        lines.append(f"  PnL: {pnl_sign}{pnl_str} \\| Source: {src}")
-        lines.append(f"  EV: {ev_str} \\| Kelly: {kelly_str}")
+        lines.append(f"  PnL: {pnl_sign}{pnl_str} \\| Source: {src} \\| {escape_md(order_state)}")
+        lines.append(f"  Net EV: {ev_str} \\| Kelly: {kelly_str}")
+        fill_pct = escape_md(f"{exec_metrics['fill_rate'] * 100:.0f}")
+        slip_bps = _fmt_bps(exec_metrics["slippage_bps"])
+        exp_ev = escape_md(f"{exec_metrics['expected_ev_dollars']:+.2f}")
+        lines.append(f"  Fill: {fill_pct}% \\| Slip: {slip_bps}bps \\| ExpEV: {exp_ev}")
         lines.append("")
 
     return "\n".join(lines)

@@ -40,6 +40,11 @@ def get_sigma(city_slug: str, source: str = "ecmwf") -> float:
     key = f"{city_slug}_{source}"
     if key in _cal:
         return _cal[key]["sigma"]
+    if "+" in source:
+        parts = [part for part in source.split("+") if part]
+        part_sigmas = [get_sigma(city_slug, part) for part in parts if f"{city_slug}_{part}" in _cal]
+        if part_sigmas:
+            return round(sum(part_sigmas) / len(part_sigmas), 3)
 
     # City-specific base sigmas: tropical/equatorial cities have much lower variance
     # than mid-latitude cities. Overrides global SIGMA_F/SIGMA_C defaults.
@@ -114,7 +119,7 @@ def record_outcome(city: str, date: str, won: bool):
 def compute_calibration_report() -> dict:
     """
     Compute calibration metrics from logged predictions.
-    Returns: brier_score, accuracy, calibration_curve, total_predictions.
+    Returns: brier_score, hit_rate, calibration_curve, total_predictions.
     """
     try:
         if not PREDICTIONS_FILE.exists():
@@ -131,9 +136,10 @@ def compute_calibration_report() -> dict:
     brier_sum = sum((p["p"] - p["outcome"]) ** 2 for p in resolved)
     brier_score = brier_sum / len(resolved)
 
-    # Accuracy: did high-confidence predictions win?
-    correct = sum(1 for p in resolved if (p["p"] > 0.5) == (p["outcome"] == 1))
-    accuracy = correct / len(resolved) if resolved else 0
+    # Long-only hit rate: every logged prediction is an executed YES/NO trade.
+    # We do not count p < 0.5 as "correct" by directional symmetry because that
+    # masks real losing trades in a long-only book.
+    hit_rate = sum(1 for p in resolved if p["outcome"] == 1) / len(resolved)
 
     # Calibration curve: group predictions into bins
     bins = {}
@@ -160,7 +166,7 @@ def compute_calibration_report() -> dict:
     return {
         "total": len(resolved),
         "brier_score": round(brier_score, 4),
-        "accuracy": round(accuracy, 3),
+        "hit_rate": round(hit_rate, 3),
         "calibration_curve": curve,
     }
 
@@ -174,7 +180,14 @@ def run_calibration(markets: list[dict]) -> dict:
     cal = load_cal()
     updated = []
 
-    for source in ["ecmwf", "hrrr", "metar"]:
+    sources = sorted({
+        s.get("best_source")
+        for m in resolved
+        for s in m.get("forecast_snapshots", [])
+        if s.get("best_source")
+    } | {"ecmwf", "hrrr", "metar"})
+
+    for source in sources:
         for city in set(m["city"] for m in resolved):
             group = [m for m in resolved if m["city"] == city]
             errors = []

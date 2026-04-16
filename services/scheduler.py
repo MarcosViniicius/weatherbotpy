@@ -33,6 +33,29 @@ _scan_activity = {
 }
 
 
+def _position_side(pos: dict) -> str:
+    return "NO" if str(pos.get("side") or "YES").upper() == "NO" else "YES"
+
+
+def _quote_for_side(outcome: dict, side: str) -> tuple[float, float, float]:
+    yes_bid = float(outcome.get("bid", outcome.get("price", 0.0)) or 0.0)
+    yes_ask = float(outcome.get("ask", outcome.get("price", 0.0)) or 0.0)
+    yes_mid = float(outcome.get("price", (yes_bid + yes_ask) / 2.0) or 0.0)
+    if side == "NO":
+        return max(0.0, 1.0 - yes_ask), min(0.9999, 1.0 - yes_bid), max(0.0, min(0.9999, 1.0 - yes_mid))
+    return yes_bid, yes_ask, yes_mid
+
+
+def _execution_metrics(pos: dict) -> tuple[float, float]:
+    requested_shares = float(pos.get("requested_shares", pos.get("shares", 0.0)) or 0.0)
+    filled_shares = float(pos.get("filled_shares", pos.get("shares", 0.0)) or 0.0)
+    expected_fill = float(pos.get("expected_fill_price", pos.get("entry_price", 0.0)) or 0.0)
+    avg_fill = float(pos.get("avg_entry_price", pos.get("entry_price", 0.0)) or 0.0)
+    fill_rate = (filled_shares / requested_shares) if requested_shares > 0 else 1.0
+    slippage_bps = ((avg_fill - expected_fill) / expected_fill * 10000) if expected_fill > 0 else 0.0
+    return fill_rate, slippage_bps
+
+
 def set_notifications(enabled: bool, interval: int = 600):
     """Toggle periodic notifications. Called from /notifications handler."""
     global _notifications_enabled, _notify_interval
@@ -90,8 +113,9 @@ async def _send_positions_update(notify_func):
             reason = pos.get("close_reason", "?")
             pnl = pos.get("pnl", 0)
             pnl_sign = "+" if pnl >= 0 else ""
-            emoji = {"stop_loss": "🛑", "trailing_stop": "🔒", "take_profit": "💰", "resolved": "✅" if pnl >= 0 else "❌", "forecast_changed": "🔄"}.get(reason, "📌")
-            lines.append(f"  {emoji} {m['city_name']} {m['date']} | {reason} | {pnl_sign}{pnl:.2f}")
+            side = _position_side(pos)
+            emoji = {"stop_loss": "🛑", "trailing_stop": "🔒", "take_profit": "💰", "resolved": "✅" if pnl >= 0 else "❌", "forecast_shift_close": "🔄"}.get(reason, "📌")
+            lines.append(f"  {emoji} {m['city_name']} {m['date']} | {side} | {reason} | {pnl_sign}{pnl:.2f}")
 
     # Open positions
     if open_pos:
@@ -100,6 +124,7 @@ async def _send_positions_update(notify_func):
 
         for m in sorted(open_pos, key=lambda x: x["city_name"]):
             pos = m["position"]
+            side = _position_side(pos)
             unit_sym = "F" if m["unit"] == "F" else "C"
             bl = pos["bucket_low"]
             bh = pos["bucket_high"]
@@ -114,24 +139,30 @@ async def _send_positions_update(notify_func):
             current_price = entry
             for o in m.get("all_outcomes", []):
                 if o["market_id"] == pos["market_id"]:
-                    current_price = o.get("bid", o["price"])
+                    best_bid, _, mid = _quote_for_side(o, side)
+                    current_price = best_bid if best_bid > 0 else mid
                     break
 
             unrealized = round((current_price - entry) * pos["shares"], 2)
             total_unrealized += unrealized
             pnl_sign = "+" if unrealized >= 0 else ""
+            fill_rate, slippage_bps = _execution_metrics(pos)
 
             # Hours left
             end_date = m.get("event_end_date", "")
             hrs = hours_to_resolution(end_date) if end_date else 0
             hrs_str = f"{hrs:.0f}h" if hrs < 100 else "—"
+            state_tag = "EXIT_PARTIAL" if pos.get("exit_order_status") == "partial" else "ENTRY_PARTIAL" if pos.get("order_status") == "partial" else "EXIT_PENDING" if pos.get("exit_order_status") == "pending" else "ENTRY_PENDING" if pos.get("order_status") == "pending" else "OPEN"
 
             # Arrow direction
             arrow = "📈" if current_price > entry else "📉" if current_price < entry else "➡️"
 
             lines.append(
-                f"  {arrow} {m['city_name']} {m['date']} | {bucket} | "
-                f"${entry:.3f}→${current_price:.3f} | {pnl_sign}{unrealized:.2f} | {hrs_str} | {src}"
+                f"  {arrow} {m['city_name']} {m['date']} | {side} {bucket} | "
+                f"${entry:.3f}→${current_price:.3f} | {pnl_sign}{unrealized:.2f} | {hrs_str} | {state_tag} | {src}"
+            )
+            lines.append(
+                f"     fill {fill_rate * 100:.0f}% | slip {slippage_bps:+.1f}bps | expEV {pos.get('requested_cost', pos.get('cost', 0.0)) * pos.get('net_ev', pos.get('ev', 0.0)):+.2f}"
             )
 
         u_sign = "+" if total_unrealized >= 0 else ""
