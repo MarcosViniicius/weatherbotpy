@@ -31,6 +31,7 @@ logger = logging.getLogger("weatherbet.strategy")
 # Adjacent buckets are allowed but receive an 8% confidence haircut to keep
 # the primary forecast bucket prioritized while still recovering near-boundary opportunities.
 ADJACENT_BUCKET_CONFIDENCE_PENALTY = 0.92
+EXACT_BUCKET_CONFIDENCE_PENALTY = 0.88
 
 # Will be set by the scheduler to push Telegram notifications
 _notify_func = None
@@ -60,6 +61,16 @@ def _notify(msg: str):
 def _is_production() -> bool:
     from services.mode_manager import get_mode
     return get_mode() == "production"
+
+
+def _shrink_probability(prob: float, confidence: float) -> float:
+    """
+    Confidence should pull probabilities toward 50/50, not toward zero.
+    The previous multiplicative adjustment overstated NO trades on low-confidence buckets.
+    """
+    p = max(0.0, min(1.0, float(prob)))
+    conf = max(0.0, min(1.0, float(confidence)))
+    return round(0.5 + (p - 0.5) * conf, 4)
 
 
 def _rollout_thresholds() -> dict:
@@ -895,8 +906,12 @@ def scan_and_update() -> tuple[int, int, int]:
                     volume = o["volume"]
                     p_yes_raw = bucket_prob(forecast_temp, t_low, t_high, sigma)
                     bucket_distance = abs(idx - primary_bucket_index) if primary_bucket_index is not None else idx
-                    conf_adj = conf * (ADJACENT_BUCKET_CONFIDENCE_PENALTY if bucket_distance == 1 else 1.0)
-                    p_yes = max(0.0, min(1.0, p_yes_raw * conf_adj))
+                    conf_adj = conf
+                    if bucket_distance == 1:
+                        conf_adj *= ADJACENT_BUCKET_CONFIDENCE_PENALTY
+                    if t_low == t_high:
+                        conf_adj *= EXACT_BUCKET_CONFIDENCE_PENALTY
+                    p_yes = _shrink_probability(p_yes_raw, conf_adj)
 
                     for side in ("YES", "NO"):
                         bid, ask, price_mid = _quotes_for_side_from_outcome(o, side)
@@ -968,6 +983,7 @@ def scan_and_update() -> tuple[int, int, int]:
                             "bucket_priority": bucket_priority,
                             "forecast_temp": forecast_temp,
                             "forecast_src":  best_source,
+                            "volume":        volume,
                             "sigma":         round(sigma, 2),
                             "sigma_base":    round(base_sigma, 2),
                             "hours_left":    round(hours, 1),
@@ -1010,12 +1026,29 @@ def scan_and_update() -> tuple[int, int, int]:
                                 best_signal["entry_price"] = real_ask
                                 best_signal["bid_at_entry"] = real_bid
                                 best_signal["spread"] = real_spread
-                                best_signal["shares"] = round(best_signal["requested_cost"] / real_ask, 2)
-                                best_signal["requested_shares"] = best_signal["shares"]
                                 # Recalculate with real execution data (keep legacy `ev` key for compatibility)
                                 best_signal["edge"] = round(calc_edge(best_signal["p"], real_ask), 4)
                                 real_ev = round(calc_ev_after_costs(best_signal["p"], real_ask, real_spread), 4)
                                 _set_signal_ev_fields(best_signal, real_ev)
+                                real_kelly = calc_kelly(best_signal["p"], real_ask)
+                                real_kelly_adjusted = min(real_kelly * best_signal.get("lm_mult", 1.0), 0.25)
+                                real_size = _estimate_entry_budget(
+                                    balance=balance,
+                                    current_open=current_open + new_pos,
+                                    ask=real_ask,
+                                    kelly_adjusted=real_kelly_adjusted,
+                                    volume=best_signal.get("volume", 0.0),
+                                )
+                                if real_size < 0.50:
+                                    skip = True
+                                else:
+                                    best_signal["kelly_raw"] = round(real_kelly, 4)
+                                    best_signal["kelly"] = round(real_kelly_adjusted, 4)
+                                    best_signal["cost"] = round(real_size, 2)
+                                    best_signal["requested_cost"] = best_signal["cost"]
+                                    best_signal["reserved_cash"] = best_signal["cost"]
+                                    best_signal["shares"] = round(best_signal["cost"] / real_ask, 2)
+                                    best_signal["requested_shares"] = best_signal["shares"]
                     except Exception as e:
                         logger.warning("[SCAN] Could not fetch real ask: %s", e)
 
@@ -1579,10 +1612,13 @@ def monitor_positions() -> int:
             continue
 
         entry = pos["entry_price"]
-        stop = float(pos.get("stop_price", _default_stop_price(entry, hours_left)) or _default_stop_price(entry, hours_left))
         city_name = LOCATIONS.get(mkt["city"], {}).get("name", mkt["city"])
         end_date = mkt.get("event_end_date", "")
         hours_left = pm_read.hours_to_resolution(end_date) if end_date else 999.0
+        stop = float(
+            pos.get("stop_price", _default_stop_price(entry, hours_left))
+            or _default_stop_price(entry, hours_left)
+        )
 
         take_profit = _take_profit_target(entry, hours_left)
 
